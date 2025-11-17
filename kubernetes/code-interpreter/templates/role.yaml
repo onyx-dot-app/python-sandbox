@@ -1,0 +1,21 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "code-interpreter.fullname" . }}
+  labels:
+    {{- include "code-interpreter.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  {{- with .Values.rbac.additionalRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

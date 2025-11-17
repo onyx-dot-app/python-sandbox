@@ -1,0 +1,12 @@
+{{- if .Values.configMap.create -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "code-interpreter.fullname" . }}
+  labels:
+    {{- include "code-interpreter.labels" . | nindent 4 }}
+data:
+  {{- with .Values.configMap.data }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

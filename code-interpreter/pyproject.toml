@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "code-interpreter"
+version = "0.1.0"
+description = "FastAPI service to execute Python code (sync, typed)"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Your Team" }]
+dependencies = [
+  "fastapi==0.115.0",
+  "httpx>=0.28.1",
+  "python-multipart>=0.0.20",
+  "uvicorn==0.30.6",
+  "kubernetes>=31.0.0",
+]
+
+[project.scripts]
+code-interpreter-api = "app.main:run"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+pretty = true
+color_output = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]
+ignore = ["S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[dependency-groups]
+dev = [
+    "autoflake>=2.3.1",
+    "dotenv>=0.9.9",
+    "mypy>=1.18.2",
+    "pre-commit>=3.8.0",
+    "pytest>=8.4.2",
+    "ruff>=0.13.1",
+]

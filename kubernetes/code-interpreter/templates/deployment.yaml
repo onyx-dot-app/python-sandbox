@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "code-interpreter.fullname" . }}
+  labels:
+    {{- include "code-interpreter.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "code-interpreter.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "code-interpreter.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "code-interpreter.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.codeInterpreter.port }}
+              protocol: TCP
+          env:
+            # Core configuration
+            - name: EXECUTOR_BACKEND
+              value: "kubernetes"
+            - name: HOST
+              value: {{ .Values.codeInterpreter.host | quote }}
+            - name: PORT
+              value: {{ .Values.codeInterpreter.port | quote }}
+            # Execution limits
+            - name: MAX_EXEC_TIMEOUT_MS
+              value: {{ .Values.codeInterpreter.maxExecTimeoutMs | quote }}
+            - name: MAX_OUTPUT_BYTES
+              value: {{ .Values.codeInterpreter.maxOutputBytes | quote }}
+            - name: CPU_TIME_LIMIT_SEC
+              value: {{ .Values.codeInterpreter.cpuTimeLimitSec | quote }}
+            - name: MEMORY_LIMIT_MB
+              value: {{ .Values.codeInterpreter.memoryLimitMb | quote }}
+            # Kubernetes executor configuration
+            - name: KUBERNETES_NAMESPACE
+              value: {{ include "code-interpreter.kubernetesNamespace" . | quote }}
+            - name: KUBERNETES_IMAGE
+              value: {{ .Values.codeInterpreter.kubernetes.image | quote }}
+            {{- if .Values.codeInterpreter.kubernetes.serviceAccount }}
+            - name: KUBERNETES_SERVICE_ACCOUNT
+              value: {{ .Values.codeInterpreter.kubernetes.serviceAccount | quote }}
+            {{- end }}
+            {{- with .Values.extraEnvVars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- with .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
