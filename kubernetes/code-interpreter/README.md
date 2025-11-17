@@ -21,11 +21,8 @@ helm repo update
 ### Install from local chart
 
 ```bash
-# From the kubernetes directory
-helm install my-code-interpreter ./code-interpreter
-
-# Or from the project root
-helm install my-code-interpreter ./kubernetes/code-interpreter
+# From the project root
+helm install code-interpreter ./kubernetes/code-interpreter
 ```
 
 ### Install with custom values
@@ -57,7 +54,7 @@ ingress:
 EOF
 
 # Install with custom values
-helm install my-code-interpreter ./code-interpreter -f my-values.yaml
+helm install code-interpreter ./code-interpreter -f my-values.yaml
 ```
 
 ## Configuration
@@ -71,7 +68,7 @@ helm install my-code-interpreter ./code-interpreter -f my-values.yaml
 | `image.tag` | Container image tag | `""` (uses chart appVersion) |
 | `codeInterpreter.maxExecTimeoutMs` | Maximum execution timeout in milliseconds | `60000` |
 | `codeInterpreter.memoryLimitMb` | Memory limit for code execution in MB | `256` |
-| `codeInterpreter.kubernetes.image` | Container image used for execution pods | `python-executor-sci` |
+| `codeInterpreter.kubernetesExecutor.image` | Container image used for execution pods | `python-executor-sci` |
 | `service.type` | Kubernetes service type | `ClusterIP` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `rbac.create` | Create RBAC resources | `true` |
@@ -86,7 +83,7 @@ See [values.yaml](values.yaml) for the full list of configurable parameters.
 helm install code-interpreter ./code-interpreter \
   --set image.repository=my-registry/code-interpreter \
   --set image.tag=latest \
-  --set codeInterpreter.kubernetes.image=my-registry/python-executor-sci:latest
+  --set codeInterpreter.kubernetesExecutor.image=my-registry/python-executor-sci:latest
 ```
 
 ### Production Setup with Ingress
@@ -99,7 +96,7 @@ helm install code-interpreter ./code-interpreter \
   --set "ingress.hosts[0].host=api.example.com" \
   --set "ingress.hosts[0].paths[0].path=/" \
   --set "ingress.hosts[0].paths[0].pathType=Prefix" \
-  --set codeInterpreter.kubernetes.namespace=code-execution \
+  --set codeInterpreter.kubernetesExecutor.namespace=code-execution \
   --set resources.requests.cpu=500m \
   --set resources.requests.memory=256Mi
 ```
@@ -208,7 +205,7 @@ kubectl auth can-i create pods \
 
 ```bash
 # Port-forward to test locally
-kubectl port-forward svc/my-code-interpreter 8000:8000
+k port-forward deployment/code-interpreter 8000:8000
 
 # Test execution
 curl -X POST http://localhost:8000/v1/execute \

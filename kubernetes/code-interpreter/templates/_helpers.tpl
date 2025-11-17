@@ -65,8 +65,8 @@ Create the name of the service account to use
 Get the namespace for Kubernetes executor
 */}}
 {{- define "code-interpreter.kubernetesNamespace" -}}
-{{- if .Values.codeInterpreter.kubernetes.namespace }}
-{{- .Values.codeInterpreter.kubernetes.namespace }}
+{{- if ne .Values.codeInterpreter.kubernetesExecutor.namespace "" }}
+{{- .Values.codeInterpreter.kubernetesExecutor.namespace }}
 {{- else }}
 {{- .Release.Namespace }}
 {{- end }}

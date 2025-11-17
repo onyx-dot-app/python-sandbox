@@ -57,13 +57,13 @@ spec:
             - name: MEMORY_LIMIT_MB
               value: {{ .Values.codeInterpreter.memoryLimitMb | quote }}
             # Kubernetes executor configuration
-            - name: KUBERNETES_NAMESPACE
+            - name: KUBERNETES_EXECUTOR_NAMESPACE
               value: {{ include "code-interpreter.kubernetesNamespace" . | quote }}
-            - name: KUBERNETES_IMAGE
-              value: {{ .Values.codeInterpreter.kubernetes.image | quote }}
-            {{- if .Values.codeInterpreter.kubernetes.serviceAccount }}
-            - name: KUBERNETES_SERVICE_ACCOUNT
-              value: {{ .Values.codeInterpreter.kubernetes.serviceAccount | quote }}
+            - name: KUBERNETES_EXECUTOR_IMAGE
+              value: {{ .Values.codeInterpreter.kubernetesExecutor.image | quote }}
+            {{- if .Values.codeInterpreter.kubernetesExecutor.serviceAccount }}
+            - name: KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
+              value: {{ .Values.codeInterpreter.kubernetesExecutor.serviceAccount | quote }}
             {{- end }}
             {{- with .Values.extraEnvVars }}
             {{- toYaml . | nindent 12 }}

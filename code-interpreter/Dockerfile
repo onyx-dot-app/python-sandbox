@@ -38,16 +38,16 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
-COPY entrypoint.sh /entrypoint.sh
+COPY entrypoint.sh ./entrypoint.sh
 # Make entrypoint script executable
-RUN chmod +x /entrypoint.sh
+RUN chmod +x ./entrypoint.sh
 
 # install dependencies
 RUN uv sync --frozen --no-dev
 
-# Create api user and optionally add to docker group
-RUN groupadd --system api \
-    && useradd --system --gid api --create-home --home-dir /home/api api \
+# Create api user with UID 1000 to match Kubernetes security context and optionally add to docker group
+RUN groupadd --gid 1000 api \
+    && useradd --uid 1000 --gid api --create-home --home-dir /home/api api \
     && chown -R api:api /app \
     && if [ "${SKIP_NESTED_DOCKER}" != "1" ]; then \
         usermod -aG docker api || true; \
@@ -66,5 +66,5 @@ ENV PYTHON_EXECUTOR_DOCKER_IMAGE=onyxdotapp/python-executor-sci
 
 EXPOSE 8000
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["code-interpreter-api"]

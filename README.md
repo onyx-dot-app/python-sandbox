@@ -1,5 +1,7 @@
 # Code Interpreter
 
+**NOTE:** Code Interpreter is currently in Alpha. Be careful with production usage.
+
 A secure, FastAPI-based service for executing Python code in isolated Docker containers. This service provides a REST API for running untrusted Python code with strict resource limits, timeout controls, and file handling capabilities.
 
 The goal of the project is to be the easiest, lightest wait way to add secure python execution to your AI agent.

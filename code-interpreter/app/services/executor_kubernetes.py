@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import tarfile
 import time
 import uuid
@@ -19,9 +20,9 @@ from kubernetes.client.exceptions import ApiException  # type: ignore[import-unt
 from kubernetes.stream import ws_client  # type: ignore[import-untyped]
 
 from app.app_configs import (
-    KUBERNETES_IMAGE,
-    KUBERNETES_NAMESPACE,
-    KUBERNETES_SERVICE_ACCOUNT,
+    KUBERNETES_EXECUTOR_IMAGE,
+    KUBERNETES_EXECUTOR_NAMESPACE,
+    KUBERNETES_EXECUTOR_SERVICE_ACCOUNT,
 )
 from app.services.executor_base import (
     BaseExecutor,
@@ -29,7 +30,9 @@ from app.services.executor_base import (
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
-from kubernetes import client, config, stream  # type: ignore[import-untyped]
+from kubernetes import client, config, stream  # type: ignore[import-untyped, attr-defined]
+
+logger = logging.getLogger(__name__)
 
 
 class KubernetesExecutor(BaseExecutor):
@@ -40,9 +43,9 @@ class KubernetesExecutor(BaseExecutor):
             config.load_kube_config()
 
         self.v1 = client.CoreV1Api()
-        self.namespace = KUBERNETES_NAMESPACE
-        self.image = KUBERNETES_IMAGE
-        self.service_account = KUBERNETES_SERVICE_ACCOUNT
+        self.namespace = KUBERNETES_EXECUTOR_NAMESPACE
+        self.image = KUBERNETES_EXECUTOR_IMAGE
+        self.service_account = KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
 
     def _create_pod_manifest(
         self,
@@ -256,6 +259,10 @@ class KubernetesExecutor(BaseExecutor):
                                    if it's a bare expression (only the last line is affected).
         """
         pod_name = f"code-exec-{uuid.uuid4().hex}"
+        logger.info(f"Starting execution in pod {pod_name}")
+        logger.debug(
+            f"Code to execute: {code[:100]}..." if len(code) > 100 else f"Code to execute: {code}"
+        )
 
         pod_manifest = self._create_pod_manifest(
             pod_name=pod_name,
@@ -264,11 +271,13 @@ class KubernetesExecutor(BaseExecutor):
         )
 
         try:
+            logger.info(f"Creating pod {pod_name} in namespace {self.namespace}")
             self.v1.create_namespaced_pod(
                 namespace=self.namespace,
                 body=pod_manifest,
             )
 
+            logger.info(f"Waiting for pod {pod_name} to be ready")
             max_wait = 30
             for _ in range(max_wait * 10):
                 pod = self.v1.read_namespaced_pod(pod_name, self.namespace)
@@ -278,8 +287,11 @@ class KubernetesExecutor(BaseExecutor):
             else:
                 raise RuntimeError(f"Pod {pod_name} did not become ready in {max_wait} seconds")
 
+            logger.info(f"Pod {pod_name} is running, creating tar archive")
             tar_archive = self._create_tar_archive(code, files, last_line_interactive)
+            logger.debug(f"Tar archive size: {len(tar_archive)} bytes")
 
+            logger.info(f"Executing tar extraction in pod {pod_name}")
             exec_command = ["tar", "-x", "-C", "/workspace"]
             resp = stream.stream(
                 self.v1.connect_get_namespaced_pod_exec,
@@ -288,23 +300,65 @@ class KubernetesExecutor(BaseExecutor):
                 command=exec_command,
                 stderr=True,
                 stdin=True,
-                stdout=False,
+                stdout=True,
                 tty=False,
                 _preload_content=False,
             )
 
-            commands: list[tuple[int, bytes]] = []
-            commands.append((ws_client.STDIN_CHANNEL, tar_archive))
-            commands.append((ws_client.STDIN_CHANNEL, b""))
+            # Write tar archive to stdin - write_stdin handles the channel protocol
+            logger.debug("Writing tar archive to stdin")
+            resp.write_stdin(tar_archive.decode("latin-1"))
+            # Close stdin by writing empty string
+            logger.debug("Closing stdin")
+            resp.write_stdin("")
 
-            for channel, data in commands:
-                if channel == ws_client.STDIN_CHANNEL:
-                    channel_prefix = bytes([channel])
-                    payload = channel_prefix + data
-                    resp.write_stdin(payload.decode("latin-1"))
+            # Wait for tar extraction to complete by reading until the stream closes
+            logger.debug("Waiting for tar extraction to complete")
+            tar_stderr = b""
+            tar_stdout = b""
+            tar_exit_code: int | None = None
+
+            while resp.is_open():
+                resp.update(timeout=1)
+                if resp.peek_stdout():
+                    chunk = resp.read_stdout().encode("utf-8")
+                    tar_stdout += chunk
+                    logger.debug(f"Tar stdout: {chunk}")
+                if resp.peek_stderr():
+                    chunk = resp.read_stderr().encode("utf-8")
+                    tar_stderr += chunk
+                    logger.warning(f"Tar stderr: {chunk}")
+
+                # Check for command completion
+                error = resp.read_channel(ws_client.ERROR_CHANNEL)
+                if error:
+                    logger.debug(f"Tar command error channel: {error}")
+                    try:
+                        error_dict = eval(error)  # noqa: S307
+                        if isinstance(error_dict, dict) and "status" in error_dict:
+                            if error_dict["status"] == "Success":
+                                tar_exit_code = 0
+                            elif "details" in error_dict and "exitCode" in error_dict["details"]:
+                                tar_exit_code = error_dict["details"]["exitCode"]
+                            else:
+                                tar_exit_code = 1
+                    except Exception as e:  # noqa: S110
+                        logger.error(f"Failed to parse error channel: {e}")
+                    break
 
             resp.close()
+            logger.info(f"Tar extraction completed with exit code: {tar_exit_code}")
 
+            # Check if tar extraction failed
+            if tar_exit_code is None:
+                raise RuntimeError("Tar extraction command did not complete")
+            if tar_exit_code != 0:
+                raise RuntimeError(
+                    f"Tar extraction failed with exit code {tar_exit_code}. "
+                    f"stderr: {tar_stderr.decode('utf-8', errors='replace')}"
+                )
+
+            logger.info(f"Executing Python code in pod {pod_name}")
             start = time.perf_counter()
             exec_command = ["python", "/workspace/__main__.py"]
 
@@ -321,6 +375,7 @@ class KubernetesExecutor(BaseExecutor):
             )
 
             if stdin:
+                logger.debug("Writing stdin to Python process")
                 exec_resp.write_stdin(stdin)
 
             stdout_data = b""
@@ -380,9 +435,20 @@ class KubernetesExecutor(BaseExecutor):
                         tty=False,
                     )
 
-            workspace_snapshot = self._extract_workspace_snapshot(pod_name)
+            logger.info(
+                f"Python execution completed. Exit code: {exit_code}, Timed out: {timed_out}"
+            )
+            logger.debug(f"stdout length: {len(stdout_data)}, stderr length: {len(stderr_data)}")
 
+            logger.info(f"Extracting workspace snapshot from pod {pod_name}")
+            workspace_snapshot = self._extract_workspace_snapshot(pod_name)
+            logger.debug(f"Workspace snapshot has {len(workspace_snapshot)} entries")
+
+        except Exception as e:
+            logger.error(f"Error during execution in pod {pod_name}: {e}", exc_info=True)
+            raise
         finally:
+            logger.info(f"Cleaning up pod {pod_name}")
             self._cleanup_pod(pod_name)
 
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -390,6 +456,7 @@ class KubernetesExecutor(BaseExecutor):
         stdout = self.truncate_output(stdout_data, max_output_bytes)
         stderr = self.truncate_output(stderr_data, max_output_bytes)
 
+        logger.info(f"Execution completed in {duration_ms}ms")
         return ExecutionResult(
             stdout=stdout,
             stderr=stderr,

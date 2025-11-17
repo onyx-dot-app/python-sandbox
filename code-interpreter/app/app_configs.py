@@ -15,9 +15,13 @@ PYTHON_EXECUTOR_DOCKER_IMAGE = (
 PYTHON_EXECUTOR_DOCKER_RUN_ARGS = os.environ.get("PYTHON_EXECUTOR_DOCKER_RUN_ARGS") or ""
 
 # Kubernetes executor configuration
-KUBERNETES_NAMESPACE = os.environ.get("KUBERNETES_NAMESPACE") or "default"
-KUBERNETES_IMAGE = os.environ.get("KUBERNETES_IMAGE") or "onyxdotapp/python-executor-sci"
-KUBERNETES_SERVICE_ACCOUNT = os.environ.get("KUBERNETES_SERVICE_ACCOUNT") or ""
+KUBERNETES_EXECUTOR_NAMESPACE = os.environ.get("KUBERNETES_EXECUTOR_NAMESPACE") or "default"
+KUBERNETES_EXECUTOR_IMAGE = (
+    os.environ.get("KUBERNETES_EXECUTOR_IMAGE") or "onyxdotapp/python-executor-sci"
+)
+KUBERNETES_EXECUTOR_SERVICE_ACCOUNT = (
+    os.environ.get("KUBERNETES_EXECUTOR_SERVICE_ACCOUNT") or ""
+)
 
 # Execution limits
 MAX_EXEC_TIMEOUT_MS = int(os.environ.get("MAX_EXEC_TIMEOUT_MS") or 60_000)

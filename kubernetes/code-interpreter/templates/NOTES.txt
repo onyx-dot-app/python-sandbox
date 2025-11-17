@@ -29,7 +29,7 @@
 3. Configuration Details:
   - Executor Backend: kubernetes
   - Kubernetes Namespace: {{ include "code-interpreter.kubernetesNamespace" . }}
-  - Executor Image: {{ .Values.codeInterpreter.kubernetes.image }}
+  - Executor Image: {{ .Values.codeInterpreter.kubernetesExecutor.image }}
   - Max Timeout: {{ .Values.codeInterpreter.maxExecTimeoutMs }}ms
   - Memory Limit: {{ .Values.codeInterpreter.memoryLimitMb }}MB
 

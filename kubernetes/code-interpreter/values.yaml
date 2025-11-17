@@ -5,10 +5,10 @@
 replicaCount: 1
 
 image:
-  repository: code-interpreter
-  pullPolicy: IfNotPresent
+  repository: onyxdotapp/code-interpreter
+  pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
-  tag: ""
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -98,7 +98,7 @@ affinity: {}
 codeInterpreter:
   # Execution limits
   maxExecTimeoutMs: 60000
-  maxOutputBytes: 1000000
+  maxOutputBytes: "1000000"
   cpuTimeLimitSec: 5
   memoryLimitMb: 256
 
@@ -107,9 +107,9 @@ codeInterpreter:
   port: 8000
 
   # Kubernetes executor configuration
-  kubernetes:
+  kubernetesExecutor:
     namespace: ""  # Empty means use the same namespace as the service
-    image: "python-executor-sci"
+    image: ""  # Empty means used the default in code: `
     serviceAccount: ""  # Empty means use default service account for pods
     # Resource limits for execution pods
     podResources:

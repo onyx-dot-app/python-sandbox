@@ -43,20 +43,25 @@ start_dockerd() {
     echo "Docker daemon is ready"
 }
 
-# Check if we're running in privileged mode (for DinD)
-# If /var/run/docker.sock doesn't exist and we have privileges, start dockerd
-if [ ! -S /var/run/docker.sock ]; then
-    if [ -w /var/run ]; then
-        echo "No Docker socket found but running with privileges - enabling Docker-in-Docker mode"
-        start_dockerd
-    else
-        echo "WARNING: No Docker socket found and insufficient privileges for Docker-in-Docker"
-        echo "This container needs either:"
-        echo "  1. Docker-out-of-Docker: -v /var/run/docker.sock:/var/run/docker.sock --user root"
-        echo "  2. Docker-in-Docker: --privileged"
-    fi
+# Skip Docker setup if using Kubernetes backend
+if [ "${EXECUTOR_BACKEND}" = "kubernetes" ]; then
+    echo "Using Kubernetes executor backend - skipping Docker setup"
 else
-    echo "Docker socket found at /var/run/docker.sock - using Docker-out-of-Docker mode"
+    # Check if we're running in privileged mode (for DinD)
+    # If /var/run/docker.sock doesn't exist and we have privileges, start dockerd
+    if [ ! -S /var/run/docker.sock ]; then
+        if [ -w /var/run ]; then
+            echo "No Docker socket found but running with privileges - enabling Docker-in-Docker mode"
+            start_dockerd
+        else
+            echo "WARNING: No Docker socket found and insufficient privileges for Docker-in-Docker"
+            echo "This container needs either:"
+            echo "  1. Docker-out-of-Docker: -v /var/run/docker.sock:/var/run/docker.sock --user root"
+            echo "  2. Docker-in-Docker: --privileged"
+        fi
+    else
+        echo "Docker socket found at /var/run/docker.sock - using Docker-out-of-Docker mode"
+    fi
 fi
 
 # Execute the main command
