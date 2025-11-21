@@ -230,3 +230,90 @@ print("Plot saved successfully")
 
         # Verify the file has reasonable size (should be several KB for a plot)
         assert len(png_bytes) > 1000, f"PNG file too small: {len(png_bytes)} bytes"
+
+
+def test_create_multiple_files() -> None:
+    timeout = httpx.Timeout(5.0, connect=5.0)
+
+    with httpx.Client(base_url=BASE_URL, timeout=timeout) as client:
+        # First check health
+        try:
+            health_response = client.get("/health")
+        except httpx.TransportError as exc:  # pragma: no cover - network failure path
+            pytest.fail(f"Failed to reach Code Interpreter service at {BASE_URL}: {exc!s}")
+
+        assert health_response.status_code == 200, health_response.text
+
+        code = """
+# Create multiple files
+with open('file1.txt', 'w') as f:
+    f.write('Content of file 1')
+
+with open('file2.txt', 'w') as f:
+    f.write('Content of file 2')
+
+with open('file3.txt', 'w') as f:
+    f.write('Content of file 3')
+
+print("Created 3 files")
+""".strip()
+
+        execute_payload: dict[str, Any] = {
+            "code": code,
+            "stdin": None,
+            "timeout_ms": 2000,
+            "files": [],
+        }
+
+        try:
+            execute_response = client.post("/v1/execute", json=execute_payload)
+        except httpx.TransportError as exc:  # pragma: no cover - network failure path
+            pytest.fail(f"Failed to reach Code Interpreter service at {BASE_URL}: {exc!s}")
+
+        assert execute_response.status_code == 200, execute_response.text
+
+        result = execute_response.json()
+
+        # Verify execution succeeded
+        assert result["stdout"] == "Created 3 files\n", f"stdout mismatch: {result}"
+        assert result["stderr"] == "", f"stderr should be empty: {result}"
+        assert result["exit_code"] == 0, f"exit_code should be 0: {result}"
+        assert result["timed_out"] is False, f"should not timeout: {result}"
+
+        # Verify all three files were created and returned
+        files = result.get("files")
+        assert isinstance(files, list), "files should be a list"
+        assert len(files) == 3, f"Expected 3 files, got {len(files)}: {files}"
+
+        # Check that all expected files are present
+        file_paths = {file_entry["path"] for file_entry in files}
+        expected_paths = {"file1.txt", "file2.txt", "file3.txt"}
+        assert file_paths == expected_paths, (
+            f"File paths mismatch. Expected: {expected_paths}, Got: {file_paths}"
+        )
+
+        # Verify each file has correct content
+        expected_contents = {
+            "file1.txt": "Content of file 1",
+            "file2.txt": "Content of file 2",
+            "file3.txt": "Content of file 3",
+        }
+
+        for file_entry in files:
+            path = file_entry["path"]
+            assert file_entry["kind"] == "file", f"{path} should be a file"
+
+            file_id = file_entry.get("file_id")
+            assert isinstance(file_id, str), f"{path} should have a file_id"
+
+            # Download and verify content
+            download_response = client.get(f"/v1/files/{file_id}")
+            assert download_response.status_code == 200, (
+                f"Failed to download {path}: {download_response.text}"
+            )
+
+            content = download_response.content.decode("utf-8")
+            expected_content = expected_contents[path]
+            assert content == expected_content, (
+                f"Content mismatch for {path}. Expected: {expected_content!r}, Got: {content!r}"
+            )
