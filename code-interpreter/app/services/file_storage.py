@@ -150,9 +150,8 @@ class FileStorageService:
                 meta_dict = json.loads(metadata_path.read_text(encoding="utf-8"))
                 metadata = FileMetadata(**meta_dict)
 
-                if (
-                    current_time - metadata.upload_time > max_age_sec 
-                    and self.delete_file(metadata.file_id)
+                if current_time - metadata.upload_time > max_age_sec and self.delete_file(
+                    metadata.file_id
                 ):
                     deleted_count += 1
             except (json.JSONDecodeError, TypeError, FileNotFoundError):

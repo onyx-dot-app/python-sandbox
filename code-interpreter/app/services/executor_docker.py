@@ -24,6 +24,7 @@ from app.services.executor_base import (
 
 logger = logging.getLogger(__name__)
 
+
 class DockerExecutor(BaseExecutor):
     def __init__(self) -> None:
         self.docker_binary = self._resolve_docker_binary()
@@ -151,9 +152,7 @@ class DockerExecutor(BaseExecutor):
                         if file_obj:
                             content = file_obj.read()
                             entries.append(
-                                WorkspaceEntry(
-                                    path=clean_path, kind="file", content=content
-                                )
+                                WorkspaceEntry(path=clean_path, kind="file", content=content)
                             )
 
             return tuple(entries)

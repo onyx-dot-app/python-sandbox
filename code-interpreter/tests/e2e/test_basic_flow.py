@@ -62,9 +62,7 @@ def test_execute_edits_passed_file() -> None:
 
         # Upload the file to be edited
         initial_content = "Hello World\nThis is line 2\nThis is line 3"
-        upload_files = {
-            "file": ("input.txt", initial_content.encode("utf-8"), "text/plain")
-        }
+        upload_files = {"file": ("input.txt", initial_content.encode("utf-8"), "text/plain")}
 
         try:
             upload_response = client.post("/v1/files", files=upload_files)
