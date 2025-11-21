@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality-checks:
+    name: Quality Checks & Integration Tests
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./code-interpreter
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run mypy type checking
+        run: uv run mypy .
+
+      - name: Run ruff linting
+        run: uv run ruff check .
+
+      - name: Run ruff formatting check
+        run: uv run ruff format --check .
+
+      - name: Run integration tests
+        run: uv run pytest tests/integration_tests -q
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./code-interpreter
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        working-directory: .
+        run: docker build -t code-interpreter:test -f code-interpreter/Dockerfile .
+
+      - name: Run Docker container for E2E tests
+        run: |
+          docker run -d --name code-interpreter-test \
+            -p 8000:8000 \
+            -e HOST=0.0.0.0 \
+            -e PORT=8000 \
+            code-interpreter:test
+
+          # Wait for service to be ready
+          for i in {1..30}; do
+            if curl -s http://localhost:8000/health > /dev/null; then
+              echo "Service is ready"
+              break
+            fi
+            echo "Waiting for service to start... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run E2E tests
+        run: uv run pytest tests/e2e -q
+        env:
+          CODE_INTERPRETER_URL: http://localhost:8000
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs code-interpreter-test
+
+      - name: Stop and remove container
+        if: always()
+        run: |
+          docker stop code-interpreter-test || true
+          docker rm code-interpreter-test || true
