@@ -10,6 +10,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from kubernetes import client, config, stream  # type: ignore
 from kubernetes.client import (  # type: ignore[import-untyped]
     V1Container,
     V1ObjectMeta,
@@ -30,7 +31,6 @@ from app.services.executor_base import (
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
-from kubernetes import client, config, stream  # type: ignore
 
 logger = logging.getLogger(__name__)
 

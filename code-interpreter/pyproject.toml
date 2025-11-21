@@ -39,6 +39,9 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]
 ignore = ["S603", "S607"]
 
+[tool.ruff.lint.isort]
+known-third-party = ["kubernetes"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
 
