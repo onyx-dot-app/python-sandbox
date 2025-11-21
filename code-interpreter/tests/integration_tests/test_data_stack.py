@@ -50,8 +50,11 @@ print(json.dumps({'summary': summary, 'png_bytes': len(buf.getvalue())}))
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["stderr"] == ""
-    assert payload["exit_code"] == 0
+    print(f"DEBUG: Full payload: {payload}")
+    assert payload["stderr"] == "", f"stderr was: {payload['stderr']}"
+    assert payload["exit_code"] == 0, (
+        f"exit_code was: {payload['exit_code']}, timed_out: {payload.get('timed_out')}"
+    )
     assert payload["timed_out"] is False
 
     stdout = payload["stdout"].strip()

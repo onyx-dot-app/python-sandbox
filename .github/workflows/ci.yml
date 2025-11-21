@@ -82,7 +82,7 @@ jobs:
           docker stop test-container || true
 
       - name: Run integration tests
-        run: uv run pytest tests/integration_tests -v --tb=short -x
+        run: uv run pytest tests/integration_tests -v --tb=short -x -s
 
       - name: Show Docker container logs on failure
         if: failure()
