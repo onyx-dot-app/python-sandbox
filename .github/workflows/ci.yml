@@ -82,17 +82,26 @@ jobs:
             -p 8000:8000 \
             -e HOST=0.0.0.0 \
             -e PORT=8000 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --user root \
             code-interpreter:test
 
           # Wait for service to be ready
+          echo "Waiting for service to start..."
           for i in {1..30}; do
-            if curl -s http://localhost:8000/health > /dev/null; then
-              echo "Service is ready"
-              break
+            if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+              echo "Service is ready!"
+              curl -s http://localhost:8000/health
+              exit 0
             fi
-            echo "Waiting for service to start... ($i/30)"
+            echo "Attempt $i/30: Service not ready yet..."
             sleep 2
           done
+
+          echo "ERROR: Service failed to start within 60 seconds"
+          echo "Container logs:"
+          docker logs code-interpreter-test
+          exit 1
 
       - name: Run E2E tests
         run: uv run pytest tests/e2e -q
