@@ -2,7 +2,6 @@ name: Build and Push Docker Images
 
 on:
   push:
-    branches: [main]
     tags:
       - 'v*'
   workflow_dispatch:
@@ -34,12 +33,10 @@ jobs:
         with:
           images: ${{ env.DOCKERHUB_USERNAME }}/python-executor-sci
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
 
       - name: Build and push executor image
         uses: docker/build-push-action@v5
@@ -76,12 +73,10 @@ jobs:
         with:
           images: ${{ env.DOCKERHUB_USERNAME }}/code-interpreter
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
 
       - name: Build and push code-interpreter image
         uses: docker/build-push-action@v5
