@@ -30,7 +30,7 @@ from app.services.executor_base import (
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
-from kubernetes import client, config, stream  # type: ignore[import-untyped,attr-defined]
+from kubernetes import client, config, stream  # type: ignore
 
 logger = logging.getLogger(__name__)
 
