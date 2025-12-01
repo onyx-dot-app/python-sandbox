@@ -14,7 +14,7 @@ This Helm chart deploys the Code Interpreter service on a Kubernetes cluster. Th
 ### Add the repository (if published)
 
 ```bash
-helm repo add code-interpreter https://charts.example.com/code-interpreter
+helm repo add code-interpreter https://onyx-dot-app.github.io/code-interpreter/
 helm repo update
 ```
 
