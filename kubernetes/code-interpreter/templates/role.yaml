@@ -12,9 +12,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create", "get"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get", "list"]
   {{- with .Values.rbac.additionalRules }}
   {{- toYaml . | nindent 2 }}
   {{- end }}
