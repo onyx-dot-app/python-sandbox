@@ -113,9 +113,7 @@ def test_write_stdin_string_causes_tar_corruption(
     after_websocket = as_string.encode("utf-8")
 
     # The byte sequences differ — this IS the corruption
-    assert after_websocket != tar_bytes, (
-        "latin-1→UTF-8 round-trip should corrupt bytes >= 0x80"
-    )
+    assert after_websocket != tar_bytes, "latin-1→UTF-8 round-trip should corrupt bytes >= 0x80"
     assert len(after_websocket) > len(tar_bytes), (
         "UTF-8 encoding expands bytes >= 0x80 into multi-byte sequences"
     )
