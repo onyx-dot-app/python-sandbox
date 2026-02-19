@@ -1,8 +1,9 @@
 # Dockerfile for the FastAPI application service (distinct from executor image)
 FROM python:3.11-slim
 
+# This can be toggled off to build a Kubernetes only image
+# Without Docker-in-Docker and Docker-out-of-Docker support, this cannot work with Docker Compose
 ARG SKIP_NESTED_DOCKER=0
-ARG SKIP_IMAGE_PRELOAD=0
 
 WORKDIR /app
 
