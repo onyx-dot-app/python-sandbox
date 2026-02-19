@@ -17,6 +17,7 @@ uv sync --locked
 ```bash
 # Start the API server (uses HOST/PORT env vars, defaults to 0.0.0.0:8000)
 code-interpreter-api
+```
 
 ### Code Quality Checks
 ```bash
@@ -100,6 +101,6 @@ There are two main kinds of tests:
 #### E2E Tests
 
 - Under the `code-interpreter/tests/e2e` directory
-- Requires the code-interpreter service to be running. Usually as a docker container.
+- Requires the code-interpreter service to be running. Usually as a Docker container.
 - After making changes, if you want to run these tests make sure to (1) stop existing containers, \
 (2) build new images, and (3) run the new containers.

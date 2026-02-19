@@ -1,23 +1,25 @@
 # Code Interpreter
 
-**NOTE:** Code Interpreter is currently in Alpha. Be careful with production usage.
+A secure service for executing untrusted Python code in isolated Docker containers. This service provides a REST API for running code with strict resource limits, timeout controls, and file handling capabilities.
 
-A secure, FastAPI-based service for executing Python code in isolated Docker containers. This service provides a REST API for running untrusted Python code with strict resource limits, timeout controls, and file handling capabilities.
+Everything runs locally and the execution environment comes pre-packaged with a list of common Python libraries.
 
-The goal of the project is to be the easiest, lightest weight way to add secure python execution to your AI agent.
+This project aims to be the easiest, lightest weight way to add secure Python execution to your AI agent.
 
-Powers the Code Interpreter in [Onyx](https://github.com/onyx-dot-app/onyx). Checkout the implementation
-[here]() as a good reference for using this in your app.
+## How it works
+
+The security first architecture and an overview of the implementation can be found [here](https://github.com/onyx-dot-app/code-interpreter/blob/main/HOW_IT_WORKS.md).
 
 ## Quick Start
 
-### Docker Deployment
+> Note: This repo powers the Code Interpreter feature in [Onyx](https://github.com/onyx-dot-app/onyx).
+Check out the implementation [here](https://github.com/onyx-dot-app/onyx/tree/main/backend/onyx/tools/tool_implementations/python) as a reference for using it in your app.
 
-The code-interpreter service needs access to Docker to run code in isolated containers. There are two deployment modes:
+### Docker Deployment
 
 #### Option 1: Docker-out-of-Docker (Recommended)
 
-This is the recommended approach for most use cases. It shares the host's Docker daemon for better performance:
+This is the recommended approach for most use cases. This shares the host's Docker daemon for better performance to spin up and manage the ephemeral code execution containers.
 
 ```bash
 docker run --rm -it \
@@ -36,7 +38,7 @@ docker run --rm -it \
 
 #### Option 2: Docker-in-Docker
 
-Use this when you need complete isolation or can't access the host Docker socket:
+Use this when you need complete isolation or can't access the host Docker socket. This runs a separate Docker daemon in a container to manage the code execution containers.
 
 ```bash
 docker run --rm -it \
@@ -57,71 +59,9 @@ docker run --rm -it \
 - Subsequent runs will reuse the cached image (instant startup)
 - The server will not accept requests until the executor image is available
 
-#### Building from Source
+### Kubernetes Deployment
 
-```bash
-# Standard build (executor image pulled at runtime)
-docker build -t code-interpreter -f code-interpreter/Dockerfile .
-
-# Build with pre-loaded executor image for instant DinD startup
-./build-preloaded.sh code-interpreter:preloaded
-```
-
-**Build arguments:**
-- `SKIP_NESTED_DOCKER=1` - Skip installing Docker entirely (only for Docker-out-of-Docker mode)
-- `PYTHON_EXECUTOR_DOCKER_IMAGE=custom/image` - Use a custom executor image
-
-#### Pre-loaded Images for Faster Startup
-
-For production or offline environments, you can build an image with the executor pre-embedded:
-
-```bash
-# Build pre-loaded image (includes executor, ~1GB larger but instant DinD startup)
-./build-preloaded.sh code-interpreter:preloaded
-
-# Run with instant startup (no pulling needed)
-docker run --rm -it \
-  --privileged \
-  -p 8000:8000 \
-  code-interpreter:preloaded
-```
-
-This is ideal for:
-- Production deployments (predictable startup times)
-- Air-gapped/offline environments
-- CI/CD pipelines
-- Any scenario where you want instant DinD readiness
-
-### Local Deployment
-
-#### Prerequisites
-
-- Python 3.11
-- Docker (for execution isolation)
-- [uv](https://github.com/astral-sh/uv) package manager (recommended)
-
-#### Running the Service
-
-```bash
-# Clone the repository
-git clone https://github.com/onyx-dot-app/code-interpreter.git
-cd code-interpreter
-
-# Activate an virtual environment
-python -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-uv sync --locked
-```
-
-```bash
-# Start the API server (defaults to 0.0.0.0:8000)
-code-interpreter-api
-
-# Or specify host/port via environment variables
-HOST=127.0.0.1 PORT=8080 code-interpreter-api
-```
+See [here](https://github.com/onyx-dot-app/code-interpreter/blob/main/kubernetes/code-interpreter/README.md) for Helm and K8s deployment instructions
 
 ## API Usage
 
@@ -213,46 +153,6 @@ Configure the service via environment variables:
 - `MAX_OUTPUT_BYTES`: Maximum output size (default: `1048576` = 1MB)
 - `MAX_FILE_SIZE_MB`: Maximum file upload size (default: `10`)
 - `FILE_STORAGE_DIR`: Directory for file storage (default: `/tmp/code-interpreter-files`)
-
-## Development
-
-### Code Quality
-
-```bash
-# Type checking (must pass strict mypy)
-mypy .
-
-# Linting
-ruff check .
-
-# Formatting
-ruff format .
-
-# Run all pre-commit hooks
-pre-commit run --all-files
-```
-
-### Testing
-
-```bash
-# Run integration tests
-pytest tests/integration_tests -q
-
-# Run a specific test
-pytest tests/integration_tests/test_file.py::test_function_name -v
-```
-
-## Architecture
-
-The service follows a layered architecture:
-
-- **API Layer** (`app/api/`): FastAPI routes and request handling
-- **Service Layer** (`app/services/`): Business logic and execution backends
-- **Models** (`app/models/`): Pydantic schemas for request/response validation
-- **Configuration** (`app/core/`): Environment-based settings management
-
-Execution is handled through an abstraction layer supporting multiple backends:
-- **Docker Executor**: Runs code in isolated Docker containers (recommended)
 
 ## Security
 
