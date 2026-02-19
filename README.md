@@ -1,6 +1,6 @@
-# Code Interpreter
+# Python Sandbox
 
-A secure service for executing untrusted Python code in isolated Docker containers. This service provides a REST API for running code with strict resource limits, timeout controls, and file handling capabilities.
+A secure code interpreter for executing untrusted Python code in isolated Docker containers. This service provides a REST API for running code with strict resource limits, timeout controls, and file handling capabilities.
 
 Everything runs locally and the execution environment comes pre-packaged with a list of common Python libraries.
 
