@@ -6,9 +6,11 @@ Everything runs locally and the execution environment comes pre-packaged with a 
 
 This project aims to be the easiest, lightest weight way to add secure Python execution to your AI agent.
 
+![Code Interpreter](code_interpreter_exp.png)
+
 ## How it works
 
-The security first architecture and an overview of the implementation can be found [here](https://github.com/onyx-dot-app/code-interpreter/blob/main/HOW_IT_WORKS.md).
+The security first architecture and an overview of the implementation can be found [here](HOW_IT_WORKS.md).
 
 ## Quick Start
 
@@ -61,7 +63,7 @@ docker run --rm -it \
 
 ### Kubernetes Deployment
 
-See [here](https://github.com/onyx-dot-app/code-interpreter/blob/main/kubernetes/code-interpreter/README.md) for Helm and K8s deployment instructions
+See [here](kubernetes/code-interpreter/README.md) for Helm and K8s deployment instructions
 
 ## API Usage
 
