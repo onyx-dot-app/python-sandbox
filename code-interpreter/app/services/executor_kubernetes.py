@@ -344,10 +344,7 @@ class KubernetesExecutor(BaseExecutor):
                 _preload_content=False,
             )
 
-            # Write tar archive to stdin as raw bytes — using bytes ensures the
-            # kubernetes client sends via binary WebSocket frames, avoiding
-            # text encoding corruption (latin-1 → UTF-8 round-trip mangles
-            # any byte >= 0x80 in the tar archive).
+            # Write tar archive to stdin as raw bytes
             logger.debug("Writing tar archive to stdin")
             resp.write_stdin(tar_archive)
             # Signal end of input
