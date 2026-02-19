@@ -344,12 +344,12 @@ class KubernetesExecutor(BaseExecutor):
                 _preload_content=False,
             )
 
-            # Write tar archive to stdin - write_stdin handles the channel protocol
+            # Write tar archive to stdin as raw bytes
             logger.debug("Writing tar archive to stdin")
-            resp.write_stdin(tar_archive.decode("latin-1"))
-            # Close stdin by writing empty string
+            resp.write_stdin(tar_archive)
+            # Signal end of input
             logger.debug("Closing stdin")
-            resp.write_stdin("")
+            resp.write_stdin(b"")
 
             # Wait for tar extraction to complete by reading until the stream closes
             logger.debug("Waiting for tar extraction to complete")
