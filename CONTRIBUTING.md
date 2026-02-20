@@ -47,7 +47,7 @@ This is ideal for:
 
 ```bash
 # Clone the repository
-git clone https://github.com/onyx-dot-app/code-interpreter.git
+git clone https://github.com/onyx-dot-app/python-sandbox.git
 cd code-interpreter
 
 # Activate a virtual environment
