@@ -159,26 +159,14 @@ class DockerExecutor(BaseExecutor):
         except (subprocess.TimeoutExpired, Exception):
             return tuple()
 
-    def execute_python(
+    def _build_run_command(
         self,
-        *,
-        code: str,
-        stdin: str | None,
+        container_name: str,
+        cpu_time_limit_sec: int | None,
+        memory_limit_mb: int | None,
         timeout_ms: int,
-        max_output_bytes: int,
-        cpu_time_limit_sec: int | None = None,
-        memory_limit_mb: int | None = None,
-        files: Sequence[tuple[str, bytes]] | None = None,
-        last_line_interactive: bool = True,
-    ) -> ExecutionResult:
-        """Execute Python code inside an ephemeral Docker container with no network.
-
-        Args:
-            last_line_interactive: If True, the last line will print its value to stdout
-                                   if it's a bare expression (only the last line is affected).
-        """
-        container_name = f"code-exec-{uuid.uuid4().hex}"
-
+    ) -> list[str]:
+        """Build the ``docker run`` command for an ephemeral container."""
         # Start the container in detached mode
         # We need CAP_CHOWN to set up the workspace, but we'll drop privileges for execution
         cmd: list[str] = [
@@ -232,12 +220,34 @@ class DockerExecutor(BaseExecutor):
             cmd.extend(shlex.split(self.run_args))
 
         # Just sleep - workspace is already created as tmpfs with correct ownership
-        cmd.extend(
-            [
-                self.image,
-                "sleep",
-                str((timeout_ms * 1000) + 10),
-            ]
+        cmd.extend([self.image, "sleep", str((timeout_ms * 1000) + 10)])
+        return cmd
+
+    def execute_python(
+        self,
+        *,
+        code: str,
+        stdin: str | None,
+        timeout_ms: int,
+        max_output_bytes: int,
+        cpu_time_limit_sec: int | None = None,
+        memory_limit_mb: int | None = None,
+        files: Sequence[tuple[str, bytes]] | None = None,
+        last_line_interactive: bool = True,
+    ) -> ExecutionResult:
+        """Execute Python code inside an ephemeral Docker container with no network.
+
+        Args:
+            last_line_interactive: If True, the last line will print its value to stdout
+                                   if it's a bare expression (only the last line is affected).
+        """
+        container_name = f"code-exec-{uuid.uuid4().hex}"
+
+        cmd = self._build_run_command(
+            container_name,
+            cpu_time_limit_sec,
+            memory_limit_mb,
+            timeout_ms
         )
 
         # Start the container
@@ -249,26 +259,7 @@ class DockerExecutor(BaseExecutor):
             logger.debug(f"Executing code: {code}")
 
             # Create tar archive with the code and files
-            tar_archive = self._create_tar_archive(code, files, last_line_interactive)
-
-            # Stream tar archive into the container (as the unprivileged user who owns /workspace)
-            tar_cmd = [
-                self.docker_binary,
-                "exec",
-                "-u",
-                "65532:65532",
-                "-i",
-                container_name,
-                "tar",
-                "-x",
-                "-C",
-                "/workspace",
-            ]
-            tar_proc = subprocess.run(tar_cmd, input=tar_archive, capture_output=True)  # nosec B603
-            if tar_proc.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to extract files: {tar_proc.stderr.decode('utf-8', errors='replace')}"
-                )
+            self._stage_files_in_container(container_name, code, files, last_line_interactive)
 
             # Execute the Python script as unprivileged user
             start = time.perf_counter()
@@ -331,6 +322,33 @@ class DockerExecutor(BaseExecutor):
             duration_ms=duration_ms,
             files=workspace_snapshot,
         )
+
+    def _stage_files_in_container(
+        self,
+        container_name: str,
+        code: str,
+        files: Sequence[tuple[str, bytes]] | None,
+        last_line_interactive: bool,
+    ) -> None:
+        """Create a tar archive and stream it into the container workspace."""
+        tar_archive = self._create_tar_archive(code, files, last_line_interactive)
+        tar_cmd = [
+            self.docker_binary,
+            "exec",
+            "-u",
+            "65532:65532",
+            "-i",
+            container_name,
+            "tar",
+            "-x",
+            "-C",
+            "/workspace",
+        ]
+        tar_proc = subprocess.run(tar_cmd, input=tar_archive, capture_output=True)  # nosec B603
+        if tar_proc.returncode != 0:
+            raise RuntimeError(
+                f"Failed to extract files: {tar_proc.stderr.decode('utf-8', errors='replace')}"
+            )
 
     def _validate_relative_path(self, path_str: str) -> Path:
         path = Path(path_str)
