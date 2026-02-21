@@ -422,6 +422,22 @@ class DockerExecutor(BaseExecutor):
             files=workspace_snapshot,
         )
 
+    def _terminate_process(self, ctx: _ExecContext, timed_out: bool) -> None:
+        """Kill the process on timeout or wait for normal exit."""
+        if timed_out:
+            subprocess.run(
+                [
+                    self.docker_binary,
+                    "exec",
+                    ctx.container_name,
+                    "pkill",
+                    "-9",
+                    "python",
+                ],
+                capture_output=True,
+            )
+            ctx.proc.kill()
+        ctx.proc.wait()
 
     def execute_python_streaming(
         self,
@@ -448,90 +464,12 @@ class DockerExecutor(BaseExecutor):
             files=files,
             last_line_interactive=last_line_interactive,
         ) as ctx:
-            if ctx.proc.stdin is None or ctx.proc.stdout is None or ctx.proc.stderr is None:
-                raise RuntimeError("Failed to open subprocess pipes")
-
-            # Write stdin and close
-            if stdin is not None:
-                ctx.proc.stdin.write(stdin.encode("utf-8"))
-            ctx.proc.stdin.close()
-
-            # Incremental reading via selectors
-            sel = selectors.DefaultSelector()
-            stdout_fd = ctx.proc.stdout.fileno()
-            stderr_fd = ctx.proc.stderr.fileno()
-            sel.register(ctx.proc.stdout, selectors.EVENT_READ, "stdout")
-            sel.register(ctx.proc.stderr, selectors.EVENT_READ, "stderr")
+            _write_stdin(ctx.proc, stdin)
 
             deadline = time.monotonic() + (timeout_ms / 1000.0)
-            timed_out = False
-            stdout_bytes_sent = 0
-            stderr_bytes_sent = 0
-            chunk_size = 4096
+            timed_out = yield from _stream_process_output(ctx.proc, deadline, max_output_bytes)
 
-            # Incremental UTF-8 decoders to handle multi-byte chars split across chunks
-            stdout_decoder = codecs.getincrementaldecoder("utf-8")("replace")
-            stderr_decoder = codecs.getincrementaldecoder("utf-8")("replace")
-
-            try:
-                while sel.get_map():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        timed_out = True
-                        break
-
-                    events = sel.select(timeout=min(remaining, 5.0))
-
-                    for key, _ in events:
-                        fd = stdout_fd if key.data == "stdout" else stderr_fd
-                        data = os.read(fd, chunk_size)
-                        if not data:
-                            sel.unregister(key.fileobj)
-                            continue
-
-                        if key.data == "stdout":
-                            if stdout_bytes_sent < max_output_bytes:
-                                allowed = max_output_bytes - stdout_bytes_sent
-                                text = stdout_decoder.decode(data[:allowed], False)
-                                if text:
-                                    yield StreamChunk(stream="stdout", data=text)
-                            stdout_bytes_sent += len(data)
-                        else:
-                            if stderr_bytes_sent < max_output_bytes:
-                                allowed = max_output_bytes - stderr_bytes_sent
-                                text = stderr_decoder.decode(data[:allowed], False)
-                                if text:
-                                    yield StreamChunk(stream="stderr", data=text)
-                            stderr_bytes_sent += len(data)
-            finally:
-                sel.close()
-
-            # Flush any remaining bytes in the decoders
-            for decoder, stream_name in [
-                (stdout_decoder, "stdout"),
-                (stderr_decoder, "stderr"),
-            ]:
-                remaining_text = decoder.decode(b"", True)
-                if remaining_text:
-                    yield StreamChunk(stream=stream_name, data=remaining_text)  # type: ignore[arg-type]
-
-            if timed_out:
-                subprocess.run(
-                    [
-                        self.docker_binary,
-                        "exec",
-                        ctx.container_name,
-                        "pkill",
-                        "-9",
-                        "python",
-                    ],
-                    capture_output=True,
-                )
-                ctx.proc.kill()
-                ctx.proc.wait()
-            else:
-                ctx.proc.wait()
-
+            self._terminate_process(ctx, timed_out)
             workspace_snapshot = self._extract_workspace_snapshot(ctx.container_name)
 
         duration_ms = int((time.perf_counter() - ctx.start) * 1000)
@@ -543,3 +481,83 @@ class DockerExecutor(BaseExecutor):
             duration_ms=duration_ms,
             files=workspace_snapshot,
         )
+
+
+def _write_stdin(proc: subprocess.Popen[bytes], stdin: str | None) -> None:
+    """Write optional stdin data and close the pipe."""
+    if proc.stdin is None:
+        raise RuntimeError("Failed to open subprocess stdin pipe")
+    if stdin is not None:
+        proc.stdin.write(stdin.encode("utf-8"))
+    proc.stdin.close()
+
+
+def _stream_process_output(
+    proc: subprocess.Popen[bytes],
+    deadline: float,
+    max_output_bytes: int,
+) -> Generator[StreamChunk, None, bool]:
+    """Read stdout/stderr incrementally and yield ``StreamChunk`` events.
+
+    Returns ``True`` if the process timed out, ``False`` otherwise.
+    """
+    if proc.stdout is None or proc.stderr is None:
+        raise RuntimeError("Failed to open subprocess output pipes")
+
+    sel = selectors.DefaultSelector()
+    stdout_fd = proc.stdout.fileno()
+    stderr_fd = proc.stderr.fileno()
+    sel.register(proc.stdout, selectors.EVENT_READ, "stdout")
+    sel.register(proc.stderr, selectors.EVENT_READ, "stderr")
+
+    timed_out = False
+    stdout_bytes_sent = 0
+    stderr_bytes_sent = 0
+    chunk_size = 4096
+
+    stdout_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    stderr_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+    try:
+        while sel.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+
+            events = sel.select(timeout=min(remaining, 5.0))
+
+            for key, _ in events:
+                fd = stdout_fd if key.data == "stdout" else stderr_fd
+                data = os.read(fd, chunk_size)
+                if not data:
+                    sel.unregister(key.fileobj)
+                    continue
+
+                if key.data == "stdout":
+                    if stdout_bytes_sent < max_output_bytes:
+                        allowed = max_output_bytes - stdout_bytes_sent
+                        text = stdout_decoder.decode(data[:allowed], False)
+                        if text:
+                            yield StreamChunk(stream="stdout", data=text)
+                    stdout_bytes_sent += len(data)
+                else:
+                    if stderr_bytes_sent < max_output_bytes:
+                        allowed = max_output_bytes - stderr_bytes_sent
+                        text = stderr_decoder.decode(data[:allowed], False)
+                        if text:
+                            yield StreamChunk(stream="stderr", data=text)
+                    stderr_bytes_sent += len(data)
+    finally:
+        sel.close()
+
+    # Flush remaining bytes in the decoders
+    for decoder, stream_name in [
+        (stdout_decoder, "stdout"),
+        (stderr_decoder, "stderr"),
+    ]:
+        remaining_text = decoder.decode(b"", True)
+        if remaining_text:
+            yield StreamChunk(stream=stream_name, data=remaining_text)  # type: ignore[arg-type]
+
+    return timed_out
