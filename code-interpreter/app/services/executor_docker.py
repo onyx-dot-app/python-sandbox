@@ -13,6 +13,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
+from typing import Literal
 
 from app.app_configs import (
     PYTHON_EXECUTOR_DOCKER_BIN,
@@ -480,6 +481,36 @@ def _write_stdin(proc: subprocess.Popen[bytes], stdin: str | None) -> None:
     proc.stdin.close()
 
 
+class _StreamTracker:
+    """Per-stream state for incremental decoding with truncation."""
+
+    __slots__ = ("stream", "decoder", "bytes_sent", "max_bytes")
+
+    def __init__(self, stream: Literal["stdout", "stderr"], max_bytes: int) -> None:
+        self.stream = stream
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.bytes_sent = 0
+        self.max_bytes = max_bytes
+
+    def decode_chunk(self, data: bytes) -> StreamChunk | None:
+        """Decode a raw chunk and return a ``StreamChunk`` if within limits."""
+        chunk: StreamChunk | None = None
+        if self.bytes_sent < self.max_bytes:
+            allowed = self.max_bytes - self.bytes_sent
+            text = self.decoder.decode(data[:allowed], False)
+            if text:
+                chunk = StreamChunk(stream=self.stream, data=text)
+        self.bytes_sent += len(data)
+        return chunk
+
+    def flush(self) -> StreamChunk | None:
+        """Flush the decoder and return a final chunk if any bytes remain."""
+        text = self.decoder.decode(b"", True)
+        if text:
+            return StreamChunk(stream=self.stream, data=text)
+        return None
+
+
 def _stream_process_output(
     proc: subprocess.Popen[bytes],
     deadline: float,
@@ -493,18 +524,19 @@ def _stream_process_output(
         raise RuntimeError("Failed to open subprocess output pipes")
 
     sel = selectors.DefaultSelector()
-    stdout_fd = proc.stdout.fileno()
-    stderr_fd = proc.stderr.fileno()
     sel.register(proc.stdout, selectors.EVENT_READ, "stdout")
     sel.register(proc.stderr, selectors.EVENT_READ, "stderr")
 
+    trackers: dict[str, _StreamTracker] = {
+        "stdout": _StreamTracker("stdout", max_output_bytes),
+        "stderr": _StreamTracker("stderr", max_output_bytes),
+    }
+    fds: dict[str, int] = {
+        "stdout": proc.stdout.fileno(),
+        "stderr": proc.stderr.fileno(),
+    }
     timed_out = False
-    stdout_bytes_sent = 0
-    stderr_bytes_sent = 0
     chunk_size = 4096
-
-    stdout_decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    stderr_decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     try:
         while sel.get_map():
@@ -516,36 +548,21 @@ def _stream_process_output(
             events = sel.select(timeout=min(remaining, 5.0))
 
             for key, _ in events:
-                fd = stdout_fd if key.data == "stdout" else stderr_fd
-                data = os.read(fd, chunk_size)
+                stream_name: str = key.data
+                data = os.read(fds[stream_name], chunk_size)
                 if not data:
                     sel.unregister(key.fileobj)
                     continue
 
-                if key.data == "stdout":
-                    if stdout_bytes_sent < max_output_bytes:
-                        allowed = max_output_bytes - stdout_bytes_sent
-                        text = stdout_decoder.decode(data[:allowed], False)
-                        if text:
-                            yield StreamChunk(stream="stdout", data=text)
-                    stdout_bytes_sent += len(data)
-                else:
-                    if stderr_bytes_sent < max_output_bytes:
-                        allowed = max_output_bytes - stderr_bytes_sent
-                        text = stderr_decoder.decode(data[:allowed], False)
-                        if text:
-                            yield StreamChunk(stream="stderr", data=text)
-                    stderr_bytes_sent += len(data)
+                chunk = trackers[stream_name].decode_chunk(data)
+                if chunk is not None:
+                    yield chunk
     finally:
         sel.close()
 
-    # Flush remaining bytes in the decoders
-    for decoder, stream_name in [
-        (stdout_decoder, "stdout"),
-        (stderr_decoder, "stderr"),
-    ]:
-        remaining_text = decoder.decode(b"", True)
-        if remaining_text:
-            yield StreamChunk(stream=stream_name, data=remaining_text)  # type: ignore[arg-type]
+    for tracker in trackers.values():
+        chunk = tracker.flush()
+        if chunk is not None:
+            yield chunk
 
     return timed_out
