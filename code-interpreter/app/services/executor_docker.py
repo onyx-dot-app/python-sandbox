@@ -275,7 +275,6 @@ class DockerExecutor(BaseExecutor):
                 f"Failed to extract files: {tar_proc.stderr.decode('utf-8', errors='replace')}"
             )
 
-    
     @contextmanager
     def _run_in_container(
         self,
@@ -332,7 +331,6 @@ class DockerExecutor(BaseExecutor):
             )
         finally:
             self._kill_container(container_name)
-
 
     def execute_python(
         self,
