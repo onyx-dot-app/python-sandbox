@@ -4,6 +4,8 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 
+from app.services.executor_base import EntryKind
+
 
 class ExecuteFile(BaseModel):
     path: StrictStr = Field(..., description="Relative file path within the execution workspace.")
@@ -14,7 +16,7 @@ class ExecuteFile(BaseModel):
 
 class WorkspaceFile(BaseModel):
     path: StrictStr
-    kind: Literal["file", "directory"]
+    kind: EntryKind
     file_id: StrictStr | None = Field(
         None, description="ID of the file in storage (only for files, not directories)."
     )

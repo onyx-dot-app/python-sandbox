@@ -22,6 +22,7 @@ from app.app_configs import (
 )
 from app.services.executor_base import (
     BaseExecutor,
+    EntryKind,
     ExecutionResult,
     StreamChunk,
     StreamEvent,
@@ -176,7 +177,7 @@ class DockerExecutor(BaseExecutor):
 
                     if member.isdir():
                         entries.append(
-                            WorkspaceEntry(path=clean_path, kind="directory", content=None)
+                            WorkspaceEntry(path=clean_path, kind=EntryKind.DIRECTORY, content=None)
                         )
                     elif member.isfile():
                         # Extract file content
@@ -184,7 +185,9 @@ class DockerExecutor(BaseExecutor):
                         if file_obj:
                             content = file_obj.read()
                             entries.append(
-                                WorkspaceEntry(path=clean_path, kind="file", content=content)
+                                WorkspaceEntry(
+                                    path=clean_path, kind=EntryKind.FILE, content=content
+                                )
                             )
 
             return tuple(entries)
