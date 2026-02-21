@@ -47,10 +47,6 @@ class DockerExecutor(BaseExecutor):
         self.image = PYTHON_EXECUTOR_DOCKER_IMAGE
         self.run_args = PYTHON_EXECUTOR_DOCKER_RUN_ARGS
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     def _resolve_docker_binary(self) -> str:
         candidate = PYTHON_EXECUTOR_DOCKER_BIN
         docker_path = which(candidate)
@@ -285,10 +281,6 @@ class DockerExecutor(BaseExecutor):
                 f"Failed to extract files: {tar_proc.stderr.decode('utf-8', errors='replace')}"
             )
 
-    # ------------------------------------------------------------------
-    # Container lifecycle context manager
-    # ------------------------------------------------------------------
-
     @contextmanager
     def _run_in_container(
         self,
@@ -345,10 +337,6 @@ class DockerExecutor(BaseExecutor):
             )
         finally:
             self._kill_container(container_name)
-
-    # ------------------------------------------------------------------
-    # Public execution methods
-    # ------------------------------------------------------------------
 
     def execute_python(
         self,
