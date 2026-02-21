@@ -1,5 +1,8 @@
+import codecs
 import io
 import logging
+import os
+import selectors
 import shlex
 import subprocess
 import tarfile
@@ -10,6 +13,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
+from typing import Literal
 
 from app.app_configs import (
     PYTHON_EXECUTOR_DOCKER_BIN,
@@ -20,6 +24,9 @@ from app.services.executor_base import (
     BaseExecutor,
     EntryKind,
     ExecutionResult,
+    StreamChunk,
+    StreamEvent,
+    StreamResult,
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
@@ -406,3 +413,159 @@ class DockerExecutor(BaseExecutor):
             duration_ms=duration_ms,
             files=workspace_snapshot,
         )
+
+    def _terminate_process(self, ctx: _ExecContext, timed_out: bool) -> None:
+        """Kill the process on timeout or wait for normal exit."""
+        if timed_out:
+            subprocess.run(
+                [
+                    self.docker_binary,
+                    "exec",
+                    ctx.container_name,
+                    "pkill",
+                    "-9",
+                    "python",
+                ],
+                capture_output=True,
+            )
+            ctx.proc.kill()
+        ctx.proc.wait()
+
+    def execute_python_streaming(
+        self,
+        *,
+        code: str,
+        stdin: str | None,
+        timeout_ms: int,
+        max_output_bytes: int,
+        cpu_time_limit_sec: int | None = None,
+        memory_limit_mb: int | None = None,
+        files: Sequence[tuple[str, bytes]] | None = None,
+        last_line_interactive: bool = True,
+    ) -> Generator[StreamEvent, None, None]:
+        """Execute Python code and yield output chunks as they arrive via SSE.
+
+        Yields StreamChunk events during execution, then a single StreamResult
+        at the end containing exit_code, timing, and workspace files.
+        """
+        with self._run_in_container(
+            code=code,
+            cpu_time_limit_sec=cpu_time_limit_sec,
+            memory_limit_mb=memory_limit_mb,
+            timeout_ms=timeout_ms,
+            files=files,
+            last_line_interactive=last_line_interactive,
+        ) as ctx:
+            _write_stdin(ctx.proc, stdin)
+
+            deadline = time.monotonic() + (timeout_ms / 1000.0)
+            timed_out = yield from _stream_process_output(ctx.proc, deadline, max_output_bytes)
+
+            self._terminate_process(ctx, timed_out)
+            workspace_snapshot = self._extract_workspace_snapshot(ctx.container_name)
+
+        duration_ms = int((time.perf_counter() - ctx.start) * 1000)
+        exit_code = None if timed_out else ctx.proc.returncode
+
+        yield StreamResult(
+            exit_code=exit_code,
+            timed_out=timed_out,
+            duration_ms=duration_ms,
+            files=workspace_snapshot,
+        )
+
+
+def _write_stdin(proc: subprocess.Popen[bytes], stdin: str | None) -> None:
+    """Write optional stdin data and close the pipe."""
+    if proc.stdin is None:
+        raise RuntimeError("Failed to open subprocess stdin pipe")
+    if stdin is not None:
+        proc.stdin.write(stdin.encode("utf-8"))
+    proc.stdin.close()
+
+
+class _StreamTracker:
+    """Per-stream state for incremental decoding with truncation."""
+
+    __slots__ = ("stream", "decoder", "bytes_sent", "max_bytes")
+
+    def __init__(self, stream: Literal["stdout", "stderr"], max_bytes: int) -> None:
+        self.stream = stream
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.bytes_sent = 0
+        self.max_bytes = max_bytes
+
+    def decode_chunk(self, data: bytes) -> StreamChunk | None:
+        """Decode a raw chunk and return a ``StreamChunk`` if within limits."""
+        chunk: StreamChunk | None = None
+        if self.bytes_sent < self.max_bytes:
+            allowed = self.max_bytes - self.bytes_sent
+            text = self.decoder.decode(data[:allowed], False)
+            if text:
+                chunk = StreamChunk(stream=self.stream, data=text)
+        self.bytes_sent += len(data)
+        return chunk
+
+    def flush(self) -> StreamChunk | None:
+        """Flush the decoder and return a final chunk if any bytes remain."""
+        text = self.decoder.decode(b"", True)
+        if text:
+            return StreamChunk(stream=self.stream, data=text)
+        return None
+
+
+def _stream_process_output(
+    proc: subprocess.Popen[bytes],
+    deadline: float,
+    max_output_bytes: int,
+) -> Generator[StreamChunk, None, bool]:
+    """Read stdout/stderr incrementally and yield ``StreamChunk`` events.
+
+    Returns ``True`` if the process timed out, ``False`` otherwise.
+    """
+    if proc.stdout is None or proc.stderr is None:
+        raise RuntimeError("Failed to open subprocess output pipes")
+
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ, "stdout")
+    sel.register(proc.stderr, selectors.EVENT_READ, "stderr")
+
+    trackers: dict[str, _StreamTracker] = {
+        "stdout": _StreamTracker("stdout", max_output_bytes),
+        "stderr": _StreamTracker("stderr", max_output_bytes),
+    }
+    fds: dict[str, int] = {
+        "stdout": proc.stdout.fileno(),
+        "stderr": proc.stderr.fileno(),
+    }
+    timed_out = False
+    chunk_size = 4096
+
+    try:
+        while sel.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+
+            events = sel.select(timeout=min(remaining, 5.0))
+
+            for key, _ in events:
+                stream_name: str = key.data
+                data = os.read(fds[stream_name], chunk_size)
+                if not data:
+                    sel.unregister(key.fileobj)
+                    continue
+
+                chunk = trackers[stream_name].decode_chunk(data)
+                if chunk is not None:
+                    yield chunk
+    finally:
+        sel.close()
+
+    for tracker in trackers.values():
+        chunk = tracker.flush()
+        if chunk is not None:
+            yield chunk
+
+    return timed_out

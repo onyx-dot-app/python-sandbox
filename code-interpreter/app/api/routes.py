@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from app.app_configs import get_settings
 from app.models.schemas import (
@@ -11,11 +12,14 @@ from app.models.schemas import (
     ExecuteResponse,
     FileMetadataResponse,
     ListFilesResponse,
+    StreamErrorEvent,
+    StreamOutputEvent,
+    StreamResultEvent,
     UploadFileResponse,
     WorkspaceFile,
 )
-from app.services.executor_base import EntryKind, WorkspaceEntry
-from app.services.executor_factory import execute_python
+from app.services.executor_base import EntryKind, StreamChunk, StreamResult, WorkspaceEntry
+from app.services.executor_factory import execute_python, execute_python_streaming
 from app.services.file_storage import FileStorageService
 
 router = APIRouter()
@@ -115,6 +119,51 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
         timed_out=result.timed_out,
         duration_ms=result.duration_ms,
         files=_save_workspace_files(result.files, input_files_map, storage),
+    )
+
+
+@router.post("/execute/stream")
+def execute_stream(req: ExecuteRequest) -> StreamingResponse:
+    """Execute Python code with streaming output via Server-Sent Events."""
+    _validate_timeout(req)
+    settings = get_settings()
+    storage = get_file_storage()
+    staged_files, input_files_map = _stage_request_files(req, storage)
+
+    def generate() -> Iterator[str]:
+        try:
+            for event in execute_python_streaming(
+                code=req.code,
+                stdin=req.stdin,
+                timeout_ms=req.timeout_ms,
+                max_output_bytes=settings.max_output_bytes,
+                cpu_time_limit_sec=settings.cpu_time_limit_sec,
+                memory_limit_mb=settings.memory_limit_mb,
+                files=staged_files,
+                last_line_interactive=req.last_line_interactive,
+            ):
+                if isinstance(event, StreamChunk):
+                    yield StreamOutputEvent(stream=event.stream, data=event.data).to_sse()
+
+                elif isinstance(event, StreamResult):
+                    yield StreamResultEvent(
+                        exit_code=event.exit_code,
+                        timed_out=event.timed_out,
+                        duration_ms=event.duration_ms,
+                        files=_save_workspace_files(event.files, input_files_map, storage),
+                    ).to_sse()
+
+        except Exception as exc:
+            yield StreamErrorEvent(message=str(exc)).to_sse()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
