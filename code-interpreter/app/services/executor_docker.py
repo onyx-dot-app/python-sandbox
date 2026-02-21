@@ -244,10 +244,7 @@ class DockerExecutor(BaseExecutor):
         container_name = f"code-exec-{uuid.uuid4().hex}"
 
         cmd = self._build_run_command(
-            container_name,
-            cpu_time_limit_sec,
-            memory_limit_mb,
-            timeout_ms
+            container_name, cpu_time_limit_sec, memory_limit_mb, timeout_ms
         )
 
         # Start the container
