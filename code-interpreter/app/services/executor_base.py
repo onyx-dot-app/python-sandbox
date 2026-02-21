@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -71,6 +71,27 @@ class WorkspaceEntry:
     content: bytes | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StreamChunk:
+    """A chunk of output from the execution."""
+
+    stream: Literal["stdout", "stderr"]
+    data: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamResult:
+    """Final execution result emitted at end of stream."""
+
+    exit_code: int | None
+    timed_out: bool
+    duration_ms: int
+    files: tuple[WorkspaceEntry, ...]
+
+
+StreamEvent = StreamChunk | StreamResult
+
+
 class ExecutorProtocol(Protocol):
     def execute_python(
         self,
@@ -106,6 +127,25 @@ class BaseExecutor(ABC):
             last_line_interactive: If True, the last line will print its value to stdout
                                    if it's a bare expression (only the last line is affected).
         """
+
+    def execute_python_streaming(
+        self,
+        *,
+        code: str,
+        stdin: str | None,
+        timeout_ms: int,
+        max_output_bytes: int,
+        cpu_time_limit_sec: int | None = None,
+        memory_limit_mb: int | None = None,
+        files: Sequence[tuple[str, bytes]] | None = None,
+        last_line_interactive: bool = True,
+    ) -> Generator[StreamEvent, None, None]:
+        """Execute Python code and yield output chunks as they arrive.
+
+        Yields StreamChunk events during execution, then a single StreamResult
+        at the end. Default implementation raises NotImplementedError.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support streaming execution")
 
     @staticmethod
     def truncate_output(stream: bytes, max_bytes: int) -> str:
