@@ -5,8 +5,9 @@ import subprocess
 import tarfile
 import time
 import uuid
-from collections.abc import Sequence
-from contextlib import suppress
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
 
@@ -17,12 +18,22 @@ from app.app_configs import (
 )
 from app.services.executor_base import (
     BaseExecutor,
+    EntryKind,
     ExecutionResult,
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _ExecContext:
+    """Holds the live container and process for the duration of an execution."""
+
+    container_name: str
+    proc: subprocess.Popen[bytes]
+    start: float
 
 
 class DockerExecutor(BaseExecutor):
@@ -49,6 +60,24 @@ class DockerExecutor(BaseExecutor):
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
+
+    def _validate_relative_path(self, path_str: str) -> Path:
+        path = Path(path_str)
+        if path.is_absolute():
+            raise ValueError("File paths must be relative.")
+
+        sanitized_parts = []
+        for part in path.parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                raise ValueError("File paths must not contain '..'.")
+            sanitized_parts.append(part)
+
+        if not sanitized_parts:
+            raise ValueError("File path must not be empty.")
+
+        return Path(*sanitized_parts)
 
     def _create_tar_archive(
         self,
@@ -109,9 +138,6 @@ class DockerExecutor(BaseExecutor):
 
     def _extract_workspace_snapshot(self, container_name: str) -> tuple[WorkspaceEntry, ...]:
         """Extract files from the container workspace after execution using tar."""
-        import io
-        import tarfile
-
         try:
             # Use tar to get all files from workspace (excluding __main__.py)
             tar_cmd = [
@@ -144,7 +170,7 @@ class DockerExecutor(BaseExecutor):
 
                     if member.isdir():
                         entries.append(
-                            WorkspaceEntry(path=clean_path, kind="directory", content=None)
+                            WorkspaceEntry(path=clean_path, kind=EntryKind.DIRECTORY, content=None)
                         )
                     elif member.isfile():
                         # Extract file content
@@ -152,33 +178,23 @@ class DockerExecutor(BaseExecutor):
                         if file_obj:
                             content = file_obj.read()
                             entries.append(
-                                WorkspaceEntry(path=clean_path, kind="file", content=content)
+                                WorkspaceEntry(
+                                    path=clean_path, kind=EntryKind.FILE, content=content
+                                )
                             )
 
             return tuple(entries)
         except (subprocess.TimeoutExpired, Exception):
             return tuple()
 
-    def execute_python(
+    def _build_run_command(
         self,
-        *,
-        code: str,
-        stdin: str | None,
+        container_name: str,
+        cpu_time_limit_sec: int | None,
+        memory_limit_mb: int | None,
         timeout_ms: int,
-        max_output_bytes: int,
-        cpu_time_limit_sec: int | None = None,
-        memory_limit_mb: int | None = None,
-        files: Sequence[tuple[str, bytes]] | None = None,
-        last_line_interactive: bool = True,
-    ) -> ExecutionResult:
-        """Execute Python code inside an ephemeral Docker container with no network.
-
-        Args:
-            last_line_interactive: If True, the last line will print its value to stdout
-                                   if it's a bare expression (only the last line is affected).
-        """
-        container_name = f"code-exec-{uuid.uuid4().hex}"
-
+    ) -> list[str]:
+        """Build the ``docker run`` command for an ephemeral container."""
         # Start the container in detached mode
         # We need CAP_CHOWN to set up the workspace, but we'll drop privileges for execution
         cmd: list[str] = [
@@ -232,45 +248,65 @@ class DockerExecutor(BaseExecutor):
             cmd.extend(shlex.split(self.run_args))
 
         # Just sleep - workspace is already created as tmpfs with correct ownership
-        cmd.extend(
-            [
-                self.image,
-                "sleep",
-                str((timeout_ms * 1000) + 10),
-            ]
-        )
+        cmd.extend([self.image, "sleep", str((timeout_ms * 1000) + 10)])
+        return cmd
 
-        # Start the container
+    def _stage_files_in_container(
+        self,
+        container_name: str,
+        code: str,
+        files: Sequence[tuple[str, bytes]] | None,
+        last_line_interactive: bool,
+    ) -> None:
+        """Create a tar archive and stream it into the container workspace."""
+        tar_archive = self._create_tar_archive(code, files, last_line_interactive)
+        tar_cmd = [
+            self.docker_binary,
+            "exec",
+            "-u",
+            "65532:65532",
+            "-i",
+            container_name,
+            "tar",
+            "-x",
+            "-C",
+            "/workspace",
+        ]
+        tar_proc = subprocess.run(tar_cmd, input=tar_archive, capture_output=True)  # nosec B603
+        if tar_proc.returncode != 0:
+            raise RuntimeError(
+                f"Failed to extract files: {tar_proc.stderr.decode('utf-8', errors='replace')}"
+            )
+
+    @contextmanager
+    def _run_in_container(
+        self,
+        *,
+        code: str,
+        cpu_time_limit_sec: int | None,
+        memory_limit_mb: int | None,
+        timeout_ms: int,
+        files: Sequence[tuple[str, bytes]] | None,
+        last_line_interactive: bool,
+    ) -> Generator[_ExecContext, None, None]:
+        """Create a container, stage files, start the Python process, and clean up.
+
+        Yields an ``_ExecContext`` whose ``proc`` is ready for I/O (stdin is
+        still open).  The container is killed in the ``finally`` block
+        regardless of how the caller exits.
+        """
+        container_name = f"code-exec-{uuid.uuid4().hex}"
+
+        cmd = self._build_run_command(
+            container_name, cpu_time_limit_sec, memory_limit_mb, timeout_ms
+        )
         start_proc = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
         if start_proc.returncode != 0:
             raise RuntimeError(f"Failed to start container: {start_proc.stderr}")
 
         try:
-            logger.debug(f"Executing code: {code}")
+            self._stage_files_in_container(container_name, code, files, last_line_interactive)
 
-            # Create tar archive with the code and files
-            tar_archive = self._create_tar_archive(code, files, last_line_interactive)
-
-            # Stream tar archive into the container (as the unprivileged user who owns /workspace)
-            tar_cmd = [
-                self.docker_binary,
-                "exec",
-                "-u",
-                "65532:65532",
-                "-i",
-                container_name,
-                "tar",
-                "-x",
-                "-C",
-                "/workspace",
-            ]
-            tar_proc = subprocess.run(tar_cmd, input=tar_archive, capture_output=True)  # nosec B603
-            if tar_proc.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to extract files: {tar_proc.stderr.decode('utf-8', errors='replace')}"
-                )
-
-            # Execute the Python script as unprivileged user
             start = time.perf_counter()
             exec_cmd = [
                 self.docker_binary,
@@ -283,7 +319,7 @@ class DockerExecutor(BaseExecutor):
                 "/workspace/__main__.py",
             ]
 
-            proc = subprocess.Popen(  # nosec B603: controlled argv
+            proc = subprocess.Popen(  # nosec B603
                 exec_cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -291,9 +327,45 @@ class DockerExecutor(BaseExecutor):
                 text=False,
             )
 
+            yield _ExecContext(
+                container_name=container_name,
+                proc=proc,
+                start=start,
+            )
+        finally:
+            self._kill_container(container_name)
+
+    def execute_python(
+        self,
+        *,
+        code: str,
+        stdin: str | None,
+        timeout_ms: int,
+        max_output_bytes: int,
+        cpu_time_limit_sec: int | None = None,
+        memory_limit_mb: int | None = None,
+        files: Sequence[tuple[str, bytes]] | None = None,
+        last_line_interactive: bool = True,
+    ) -> ExecutionResult:
+        """Execute Python code inside an ephemeral Docker container with no network.
+
+        Args:
+            last_line_interactive: If True, the last line will print its value to stdout
+                                   if it's a bare expression (only the last line is affected).
+        """
+        with self._run_in_container(
+            code=code,
+            cpu_time_limit_sec=cpu_time_limit_sec,
+            memory_limit_mb=memory_limit_mb,
+            timeout_ms=timeout_ms,
+            files=files,
+            last_line_interactive=last_line_interactive,
+        ) as ctx:
+            logger.debug(f"Executing code: {code}")
+
             try:
                 input_bytes = stdin.encode("utf-8") if stdin is not None else None
-                stdout_bytes, stderr_bytes = proc.communicate(
+                stdout_bytes, stderr_bytes = ctx.proc.communicate(
                     input=input_bytes,
                     timeout=timeout_ms / 1000.0,
                 )
@@ -302,26 +374,29 @@ class DockerExecutor(BaseExecutor):
                 timed_out = True
                 # Kill the Python process in the container (as root to ensure we can kill it)
                 subprocess.run(
-                    [self.docker_binary, "exec", container_name, "pkill", "-9", "python"],
+                    [
+                        self.docker_binary,
+                        "exec",
+                        ctx.container_name,
+                        "pkill",
+                        "-9",
+                        "python",
+                    ],
                     capture_output=True,
                 )
-                proc.kill()
-                stdout_bytes, stderr_bytes = proc.communicate()
+                ctx.proc.kill()
+                stdout_bytes, stderr_bytes = ctx.proc.communicate()
 
             # Extract workspace snapshot
-            workspace_snapshot = self._extract_workspace_snapshot(container_name)
+            workspace_snapshot = self._extract_workspace_snapshot(ctx.container_name)
 
-        finally:
-            # Clean up container
-            self._kill_container(container_name)
-
-        duration_ms = int((time.perf_counter() - start) * 1000)
+        duration_ms = int((time.perf_counter() - ctx.start) * 1000)
 
         stdout = self.truncate_output(stdout_bytes or b"", max_output_bytes)
         logger.debug(f"stdout: {stdout}")
         stderr = self.truncate_output(stderr_bytes or b"", max_output_bytes)
         logger.debug(f"stderr: {stderr}")
-        exit_code = None if timed_out else proc.returncode
+        exit_code = None if timed_out else ctx.proc.returncode
 
         return ExecutionResult(
             stdout=stdout,
@@ -331,21 +406,3 @@ class DockerExecutor(BaseExecutor):
             duration_ms=duration_ms,
             files=workspace_snapshot,
         )
-
-    def _validate_relative_path(self, path_str: str) -> Path:
-        path = Path(path_str)
-        if path.is_absolute():
-            raise ValueError("File paths must be relative.")
-
-        sanitized_parts = []
-        for part in path.parts:
-            if part in ("", "."):
-                continue
-            if part == "..":
-                raise ValueError("File paths must not contain '..'.")
-            sanitized_parts.append(part)
-
-        if not sanitized_parts:
-            raise ValueError("File path must not be empty.")
-
-        return Path(*sanitized_parts)

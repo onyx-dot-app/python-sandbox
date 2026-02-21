@@ -14,7 +14,7 @@ from app.models.schemas import (
     UploadFileResponse,
     WorkspaceFile,
 )
-from app.services.executor_base import ExecutionResult
+from app.services.executor_base import EntryKind, WorkspaceEntry
 from app.services.executor_factory import execute_python
 from app.services.file_storage import FileStorageService
 
@@ -33,25 +33,26 @@ def get_file_storage() -> FileStorageService:
     return _file_storage
 
 
-@router.post("/execute", response_model=ExecuteResponse, status_code=status.HTTP_200_OK)
-def execute(req: ExecuteRequest) -> ExecuteResponse:
-    """Execute provided Python code synchronously within an isolated Docker container."""
+def _validate_timeout(req: ExecuteRequest) -> None:
     settings = get_settings()
-
     if req.timeout_ms > settings.max_exec_timeout_ms:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"timeout_ms exceeds maximum of {settings.max_exec_timeout_ms} ms",
         )
 
+
+def _stage_request_files(
+    req: ExecuteRequest,
+    storage: FileStorageService,
+) -> tuple[list[tuple[str, bytes]], dict[str, bytes]]:
+    """Resolve uploaded file IDs into content for the executor.
+
+    Returns (staged_files, input_files_map).
+    """
     staged_files: list[tuple[str, bytes]] = []
-    storage = get_file_storage()
-
-    # Track input files for later comparison
     input_files_map: dict[str, bytes] = {}
-
     for file in req.files:
-        # Fetch content from storage by file_id
         try:
             content, _ = storage.get_file(file.file_id)
         except FileNotFoundError as exc:
@@ -59,12 +60,39 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"File with ID '{file.file_id}' not found for path '{file.path}'.",
             ) from exc
-
         staged_files.append((file.path, content))
         input_files_map[file.path] = content
+    return staged_files, input_files_map
+
+
+def _save_workspace_files(
+    entries: tuple[WorkspaceEntry, ...],
+    input_files_map: dict[str, bytes],
+    storage: FileStorageService,
+) -> list[WorkspaceFile]:
+    """Filter and save new/modified workspace files to storage."""
+    workspace_files: list[WorkspaceFile] = []
+    for entry in entries:
+        if entry.kind == EntryKind.DIRECTORY:
+            continue
+        if entry.kind == EntryKind.FILE and entry.content is not None:
+            if entry.path in input_files_map and entry.content == input_files_map[entry.path]:
+                continue
+            file_id = storage.save_file(entry.content, entry.path)
+            workspace_files.append(WorkspaceFile(path=entry.path, kind=entry.kind, file_id=file_id))
+    return workspace_files
+
+
+@router.post("/execute", response_model=ExecuteResponse, status_code=status.HTTP_200_OK)
+def execute(req: ExecuteRequest) -> ExecuteResponse:
+    """Execute provided Python code synchronously within an isolated Docker container."""
+    _validate_timeout(req)
+    settings = get_settings()
+    storage = get_file_storage()
+    staged_files, input_files_map = _stage_request_files(req, storage)
 
     try:
-        result: ExecutionResult = execute_python(
+        result = execute_python(
             code=req.code,
             stdin=req.stdin,
             timeout_ms=req.timeout_ms,
@@ -80,37 +108,13 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
             detail=str(exc),
         ) from exc
 
-    # Save output files to storage and return file IDs
-    # Only include files that were created or modified (not unchanged input files or directories)
-    workspace_files: list[WorkspaceFile] = []
-    for entry in result.files:
-        # Skip directories entirely
-        if entry.kind == "directory":
-            continue
-
-        if entry.kind == "file" and entry.content is not None:
-            # Check if this file was in the input and has the same content
-            if entry.path in input_files_map and entry.content == input_files_map[entry.path]:
-                # File is unchanged from input - skip it
-                continue
-
-            # File is new or modified - save it to storage
-            file_id = storage.save_file(entry.content, entry.path)
-            workspace_files.append(
-                WorkspaceFile(
-                    path=entry.path,
-                    kind=entry.kind,
-                    file_id=file_id,
-                )
-            )
-
     return ExecuteResponse(
         stdout=result.stdout,
         stderr=result.stderr,
         exit_code=result.exit_code,
         timed_out=result.timed_out,
         duration_ms=result.duration_ms,
-        files=workspace_files,
+        files=_save_workspace_files(result.files, input_files_map, storage),
     )
 
 
