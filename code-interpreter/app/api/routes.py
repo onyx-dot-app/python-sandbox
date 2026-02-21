@@ -14,7 +14,7 @@ from app.models.schemas import (
     UploadFileResponse,
     WorkspaceFile,
 )
-from app.services.executor_base import WorkspaceEntry
+from app.services.executor_base import EntryKind, WorkspaceEntry
 from app.services.executor_factory import execute_python
 from app.services.file_storage import FileStorageService
 
@@ -73,9 +73,9 @@ def _save_workspace_files(
     """Filter and save new/modified workspace files to storage."""
     workspace_files: list[WorkspaceFile] = []
     for entry in entries:
-        if entry.kind == "directory":
+        if entry.kind == EntryKind.DIRECTORY:
             continue
-        if entry.kind == "file" and entry.content is not None:
+        if entry.kind == EntryKind.FILE and entry.content is not None:
             if entry.path in input_files_map and entry.content == input_files_map[entry.path]:
                 continue
             file_id = storage.save_file(entry.content, entry.path)

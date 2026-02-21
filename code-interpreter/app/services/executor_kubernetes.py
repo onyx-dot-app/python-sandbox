@@ -28,6 +28,7 @@ from app.app_configs import (
 )
 from app.services.executor_base import (
     BaseExecutor,
+    EntryKind,
     ExecutionResult,
     WorkspaceEntry,
     wrap_last_line_interactive,
@@ -251,7 +252,7 @@ class KubernetesExecutor(BaseExecutor):
 
                     if member.isdir():
                         entries.append(
-                            WorkspaceEntry(path=clean_path, kind="directory", content=None)
+                            WorkspaceEntry(path=clean_path, kind=EntryKind.DIRECTORY, content=None)
                         )
                     elif member.isfile():
                         file_obj = tar.extractfile(member)
@@ -259,7 +260,9 @@ class KubernetesExecutor(BaseExecutor):
                             content = file_obj.read()
                             logger.debug(f"Extracted file {clean_path}: {len(content)} bytes")
                             entries.append(
-                                WorkspaceEntry(path=clean_path, kind="file", content=content)
+                                WorkspaceEntry(
+                                    path=clean_path, kind=EntryKind.FILE, content=content
+                                )
                             )
                         else:
                             logger.warning(f"Failed to extract file content for {clean_path}")

@@ -3,7 +3,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from enum import StrEnum
+from typing import Protocol
 
 
 def wrap_last_line_interactive(code: str) -> str:
@@ -64,10 +65,15 @@ class ExecutionResult:
     files: tuple[WorkspaceEntry, ...]
 
 
+class EntryKind(StrEnum):
+    FILE = "file"
+    DIRECTORY = "directory"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceEntry:
     path: str
-    kind: Literal["file", "directory"]
+    kind: EntryKind
     content: bytes | None = None
 
 
