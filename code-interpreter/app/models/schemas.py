@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 
@@ -48,6 +48,51 @@ class ExecuteResponse(BaseModel):
         default_factory=list,
         description="Snapshot of the execution workspace after completion.",
     )
+
+
+class SSEModel(BaseModel):
+    """Base for Server-Sent Event payloads.
+
+    Subclasses declare ``sse_event`` as a ClassVar to set the SSE event type.
+    Call ``to_sse()`` to get a fully-formatted SSE frame.
+    """
+
+    sse_event: ClassVar[str]
+
+    def to_sse(self) -> str:
+        data = self.model_dump_json()
+        return f"event: {self.sse_event}\ndata: {data}\n\n"
+
+
+class StreamOutputEvent(SSEModel):
+    """Payload for 'output' SSE events."""
+
+    sse_event: ClassVar[str] = "output"
+
+    stream: Literal["stdout", "stderr"]
+    data: StrictStr
+
+
+class StreamResultEvent(SSEModel):
+    """Payload for the final 'result' SSE event."""
+
+    sse_event: ClassVar[str] = "result"
+
+    exit_code: int | None
+    timed_out: bool
+    duration_ms: StrictInt
+    files: list[WorkspaceFile] = Field(
+        default_factory=list,
+        description="Snapshot of the execution workspace after completion.",
+    )
+
+
+class StreamErrorEvent(SSEModel):
+    """Payload for 'error' SSE events."""
+
+    sse_event: ClassVar[str] = "error"
+
+    message: StrictStr
 
 
 class UploadFileResponse(BaseModel):

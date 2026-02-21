@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from functools import lru_cache
 
 from app.app_configs import EXECUTOR_BACKEND
-from app.services.executor_base import BaseExecutor, ExecutionResult
+from app.services.executor_base import BaseExecutor, ExecutionResult, StreamEvent
 
 
 @lru_cache(maxsize=1)
@@ -43,6 +43,31 @@ def execute_python(
     """
     executor = get_executor()
     return executor.execute_python(
+        code=code,
+        stdin=stdin,
+        timeout_ms=timeout_ms,
+        max_output_bytes=max_output_bytes,
+        cpu_time_limit_sec=cpu_time_limit_sec,
+        memory_limit_mb=memory_limit_mb,
+        files=files,
+        last_line_interactive=last_line_interactive,
+    )
+
+
+def execute_python_streaming(
+    *,
+    code: str,
+    stdin: str | None,
+    timeout_ms: int,
+    max_output_bytes: int,
+    cpu_time_limit_sec: int | None = None,
+    memory_limit_mb: int | None = None,
+    files: Sequence[tuple[str, bytes]] | None = None,
+    last_line_interactive: bool = True,
+) -> Generator[StreamEvent, None, None]:
+    """Execute Python code using the configured backend, yielding streaming events."""
+    executor = get_executor()
+    yield from executor.execute_python_streaming(
         code=code,
         stdin=stdin,
         timeout_ms=timeout_ms,

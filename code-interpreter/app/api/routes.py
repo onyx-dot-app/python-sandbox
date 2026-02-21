@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from app.app_configs import get_settings
 from app.models.schemas import (
@@ -11,11 +12,14 @@ from app.models.schemas import (
     ExecuteResponse,
     FileMetadataResponse,
     ListFilesResponse,
+    StreamErrorEvent,
+    StreamOutputEvent,
+    StreamResultEvent,
     UploadFileResponse,
     WorkspaceFile,
 )
-from app.services.executor_base import ExecutionResult
-from app.services.executor_factory import execute_python
+from app.services.executor_base import ExecutionResult, StreamChunk, StreamResult
+from app.services.executor_factory import execute_python, execute_python_streaming
 from app.services.file_storage import FileStorageService
 
 router = APIRouter()
@@ -111,6 +115,88 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
         timed_out=result.timed_out,
         duration_ms=result.duration_ms,
         files=workspace_files,
+    )
+
+
+@router.post("/execute/stream")
+def execute_stream(req: ExecuteRequest) -> StreamingResponse:
+    """Execute Python code with streaming output via Server-Sent Events."""
+    settings = get_settings()
+
+    if req.timeout_ms > settings.max_exec_timeout_ms:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"timeout_ms exceeds maximum of {settings.max_exec_timeout_ms} ms",
+        )
+
+    staged_files: list[tuple[str, bytes]] = []
+    storage = get_file_storage()
+    input_files_map: dict[str, bytes] = {}
+
+    for file in req.files:
+        try:
+            content, _ = storage.get_file(file.file_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"File with ID '{file.file_id}' not found for path '{file.path}'.",
+            ) from exc
+        staged_files.append((file.path, content))
+        input_files_map[file.path] = content
+
+    def generate() -> Iterator[str]:
+        try:
+            for event in execute_python_streaming(
+                code=req.code,
+                stdin=req.stdin,
+                timeout_ms=req.timeout_ms,
+                max_output_bytes=settings.max_output_bytes,
+                cpu_time_limit_sec=settings.cpu_time_limit_sec,
+                memory_limit_mb=settings.memory_limit_mb,
+                files=staged_files,
+                last_line_interactive=req.last_line_interactive,
+            ):
+                if isinstance(event, StreamChunk):
+                    yield StreamOutputEvent(stream=event.stream, data=event.data).to_sse()
+
+                elif isinstance(event, StreamResult):
+                    workspace_files: list[WorkspaceFile] = []
+                    for entry in event.files:
+                        if entry.kind == "directory":
+                            continue
+                        if entry.kind == "file" and entry.content is not None:
+                            if (
+                                entry.path in input_files_map
+                                and entry.content == input_files_map[entry.path]
+                            ):
+                                continue
+                            file_id = storage.save_file(entry.content, entry.path)
+                            workspace_files.append(
+                                WorkspaceFile(
+                                    path=entry.path,
+                                    kind=entry.kind,
+                                    file_id=file_id,
+                                )
+                            )
+
+                    yield StreamResultEvent(
+                        exit_code=event.exit_code,
+                        timed_out=event.timed_out,
+                        duration_ms=event.duration_ms,
+                        files=workspace_files,
+                    ).to_sse()
+
+        except Exception as exc:
+            yield StreamErrorEvent(message=str(exc)).to_sse()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
