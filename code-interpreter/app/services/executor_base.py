@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, Literal
+from typing import Literal, Protocol
 
 
 def wrap_last_line_interactive(code: str) -> str:

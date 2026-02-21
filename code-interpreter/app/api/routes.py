@@ -18,7 +18,7 @@ from app.models.schemas import (
     UploadFileResponse,
     WorkspaceFile,
 )
-from app.services.executor_base import StreamChunk, StreamResult, WorkspaceEntry, EntryKind
+from app.services.executor_base import EntryKind, StreamChunk, StreamResult, WorkspaceEntry
 from app.services.executor_factory import execute_python, execute_python_streaming
 from app.services.file_storage import FileStorageService
 
