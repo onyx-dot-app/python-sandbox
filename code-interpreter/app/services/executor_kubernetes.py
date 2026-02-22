@@ -554,7 +554,7 @@ class KubernetesExecutor(BaseExecutor):
             duration_ms=duration_ms,
             files=workspace_snapshot,
         )
-    
+
     def execute_python_streaming(
         self,
         *,
