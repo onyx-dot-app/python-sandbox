@@ -50,7 +50,7 @@ def _parse_exit_code(error: str) -> int | None:
                 return int(details["exitCode"])
             return 1
     except Exception:
-        pass
+        return None
     return None
 
 
