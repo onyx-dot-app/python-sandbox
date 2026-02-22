@@ -32,6 +32,9 @@ from app.services.executor_base import (
     EntryKind,
     ExecutionResult,
     HealthCheck,
+    StreamEvent,
+    StreamResult,
+    StreamChunk,
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
@@ -615,3 +618,56 @@ class KubernetesExecutor(BaseExecutor):
             raise ValueError("File path must not be empty.")
 
         return Path(*sanitized_parts)
+
+
+def _stream_kube_output(
+    exec_resp: Any,
+    deadline: float,
+    max_output_bytes: int,
+) -> Generator[StreamChunk, None, tuple[int | None, bool]]:
+    """Read stdout/stderr from a Kubernetes exec stream and yield StreamChunk events.
+
+    Returns a (exit_code, timed_out) tuple.
+    """
+    stdout_bytes = 0
+    stderr_bytes = 0
+    exit_code: int | None = None
+    timed_out = False
+
+    while exec_resp.is_open():
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            timed_out = True
+            break
+
+        exec_resp.update(timeout=min(remaining, 1))
+
+        if exec_resp.peek_stdout():
+            text: str = exec_resp.read_stdout()
+            raw = text.encode("utf-8")
+            if stdout_bytes < max_output_bytes:
+                allowed = max_output_bytes - stdout_bytes
+                if len(raw) > allowed:
+                    text = raw[:allowed].decode("utf-8", errors="ignore")
+                if text:
+                    yield StreamChunk(stream="stdout", data=text)
+            stdout_bytes += len(raw)
+
+        if exec_resp.peek_stderr():
+            text = exec_resp.read_stderr()
+            raw = text.encode("utf-8")
+            if stderr_bytes < max_output_bytes:
+                allowed = max_output_bytes - stderr_bytes
+                if len(raw) > allowed:
+                    text = raw[:allowed].decode("utf-8", errors="ignore")
+                if text:
+                    yield StreamChunk(stream="stderr", data=text)
+            stderr_bytes += len(raw)
+
+        error: str = exec_resp.read_channel(ws_client.ERROR_CHANNEL)
+        if error:
+            exit_code = _parse_exit_code(error)
+            break
+
+    exec_resp.close()
+    return exit_code, timed_out
