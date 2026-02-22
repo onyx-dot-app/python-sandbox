@@ -49,7 +49,8 @@ def _parse_exit_code(error: str) -> int | None:
             if isinstance(details, dict) and "exitCode" in details:
                 return int(details["exitCode"])
             return 1
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Error occurred when parsing exit code: {e}")
         return None
     return None
 
