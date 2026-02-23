@@ -117,9 +117,6 @@ class ListFilesResponse(BaseModel):
     )
 
 
-# ── Health check models ──────────────────────────────────────────────
-
-
 class HealthResponse(BaseModel):
     status: Literal["ok", "error"]
     message: StrictStr | None = None
