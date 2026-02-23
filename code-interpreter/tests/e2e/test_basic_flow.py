@@ -18,7 +18,7 @@ def test_execute_endpoint_basic_flow() -> None:
             pytest.fail(f"Failed to reach Code Interpreter service at {BASE_URL}: {exc!s}")
 
         assert health_response.status_code == 200, health_response.text
-        assert health_response.json() == {"status": "ok"}
+        assert health_response.json()["status"] == "ok"
 
         execute_payload: dict[str, Any] = {
             "code": "print('hello from e2e')",

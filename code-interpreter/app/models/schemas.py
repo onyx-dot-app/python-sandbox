@@ -115,3 +115,8 @@ class ListFilesResponse(BaseModel):
         default_factory=list,
         description="List of all stored files with their metadata.",
     )
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok", "error"]
+    message: StrictStr | None = None

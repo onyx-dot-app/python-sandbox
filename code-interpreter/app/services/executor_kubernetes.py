@@ -31,6 +31,7 @@ from app.services.executor_base import (
     BaseExecutor,
     EntryKind,
     ExecutionResult,
+    HealthCheck,
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
@@ -75,6 +76,22 @@ class KubernetesExecutor(BaseExecutor):
         self.namespace = KUBERNETES_EXECUTOR_NAMESPACE
         self.image = KUBERNETES_EXECUTOR_IMAGE
         self.service_account = KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
+
+    def check_health(self) -> HealthCheck:
+        """Verify Kubernetes API is reachable and the namespace is accessible."""
+        try:
+            self.v1.read_namespace(name=self.namespace)
+        except ApiException as e:
+            return HealthCheck(
+                status="error",
+                message=f"Kubernetes API error (namespace={self.namespace}): {e.reason}",
+            )
+        except Exception as e:
+            return HealthCheck(
+                status="error",
+                message=f"Kubernetes API not reachable: {e}",
+            )
+        return HealthCheck(status="ok")
 
     def _create_pod_manifest(
         self,

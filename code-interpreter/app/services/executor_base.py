@@ -98,6 +98,14 @@ class StreamResult:
 StreamEvent = StreamChunk | StreamResult
 
 
+@dataclass(frozen=True, slots=True)
+class HealthCheck:
+    """Result of an executor health check."""
+
+    status: Literal["ok", "error"]
+    message: str | None = None
+
+
 class ExecutorProtocol(Protocol):
     def execute_python(
         self,
@@ -114,6 +122,13 @@ class ExecutorProtocol(Protocol):
 
 
 class BaseExecutor(ABC):
+    def check_health(self) -> HealthCheck:
+        """Check if the executor backend is operational.
+
+        Default implementation returns ok. Override for backend-specific checks.
+        """
+        return HealthCheck(status="ok")
+
     @abstractmethod
     def execute_python(
         self,
