@@ -108,7 +108,6 @@ def create_app() -> FastAPI:
         result = get_executor().check_health()
         return HealthResponse(status=result.status, message=result.message)
 
-
     app.include_router(api_router, prefix="/v1")
     return app
 
