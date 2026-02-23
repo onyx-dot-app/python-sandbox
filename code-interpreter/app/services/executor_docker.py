@@ -24,6 +24,7 @@ from app.services.executor_base import (
     BaseExecutor,
     EntryKind,
     ExecutionResult,
+    HealthCheck,
     StreamChunk,
     StreamEvent,
     StreamResult,
@@ -48,6 +49,51 @@ class DockerExecutor(BaseExecutor):
         self.docker_binary = self._resolve_docker_binary()
         self.image = PYTHON_EXECUTOR_DOCKER_IMAGE
         self.run_args = PYTHON_EXECUTOR_DOCKER_RUN_ARGS
+
+    def check_health(self) -> HealthCheck:
+        """Verify Docker daemon is reachable and the executor image is available."""
+        # Check Docker daemon connectivity
+        try:
+            result = subprocess.run(
+                [self.docker_binary, "version", "--format", "{{.Server.Version}}"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except FileNotFoundError:
+            return HealthCheck(status="error", message="Docker binary not found")
+        except subprocess.TimeoutExpired:
+            return HealthCheck(status="error", message="Docker daemon not responding")
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            return HealthCheck(
+                status="error",
+                message=f"Docker daemon not reachable: {stderr}",
+            )
+
+        # Check executor image is available locally
+        image_with_tag = f"{self.image}:latest"
+        try:
+            img_result = subprocess.run(
+                [self.docker_binary, "image", "inspect", image_with_tag],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return HealthCheck(
+                status="error",
+                message=f"Timeout checking image {image_with_tag}",
+            )
+
+        if img_result.returncode != 0:
+            return HealthCheck(
+                status="error",
+                message=f"Executor image {image_with_tag} not available locally",
+            )
+
+        return HealthCheck(status="ok")
 
     def _resolve_docker_binary(self) -> str:
         candidate = PYTHON_EXECUTOR_DOCKER_BIN

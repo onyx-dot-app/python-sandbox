@@ -11,6 +11,8 @@ from fastapi import FastAPI
 
 from app.api.routes import router as api_router
 from app.app_configs import EXECUTOR_BACKEND, HOST, PORT, PYTHON_EXECUTOR_DOCKER_IMAGE
+from app.models.schemas import HealthResponse
+from app.services.executor_factory import get_executor
 
 # Configure logging
 logging.basicConfig(
@@ -101,8 +103,11 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/health")
-    def health() -> dict[str, str]:  # sync + strictly typed
-        return {"status": "ok"}
+    def health() -> HealthResponse:
+        """Health check that verifies the executor backend is operational."""
+        result = get_executor().check_health()
+        return HealthResponse(status=result.status, message=result.message)
+
 
     app.include_router(api_router, prefix="/v1")
     return app
