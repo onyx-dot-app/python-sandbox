@@ -32,9 +32,9 @@ from app.services.executor_base import (
     EntryKind,
     ExecutionResult,
     HealthCheck,
+    StreamChunk,
     StreamEvent,
     StreamResult,
-    StreamChunk,
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
@@ -64,7 +64,7 @@ class _KubeExecContext:
     """Holds the live pod and exec stream for the duration of an execution."""
 
     pod_name: str
-    exec_resp: Any  # kubernetes WSClient
+    exec_resp: ws_client.WSClient
     start: float
 
 
@@ -621,7 +621,7 @@ class KubernetesExecutor(BaseExecutor):
 
 
 def _stream_kube_output(
-    exec_resp: Any,
+    exec_resp: ws_client.WSClient,
     deadline: float,
     max_output_bytes: int,
 ) -> Generator[StreamChunk, None, tuple[int | None, bool]]:
