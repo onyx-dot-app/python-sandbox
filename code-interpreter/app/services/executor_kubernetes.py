@@ -103,7 +103,10 @@ class KubernetesExecutor(BaseExecutor):
                 )
                 return HealthCheck(
                     status="error",
-                    message=f"Service account lacks permission to create pods in namespace={self.namespace}",
+                    message=(
+                        "Service account lacks permission to create "
+                        f"pods in namespace={self.namespace}"
+                    ),
                 )
         except ApiException as e:
             return HealthCheck(
