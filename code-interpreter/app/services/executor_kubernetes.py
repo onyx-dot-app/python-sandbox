@@ -83,7 +83,7 @@ class KubernetesExecutor(BaseExecutor):
     def check_health(self) -> HealthCheck:
         """Verify Kubernetes API is reachable and the namespace is accessible."""
         try:
-            self.v1.read_namespace(name=self.namespace)
+            self.v1.list_namespaced_pod(namespace=self.namespace, limit=1)
         except ApiException as e:
             return HealthCheck(
                 status="error",
