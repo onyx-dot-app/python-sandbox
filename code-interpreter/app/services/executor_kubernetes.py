@@ -81,9 +81,33 @@ class KubernetesExecutor(BaseExecutor):
         self.service_account = KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
 
     def check_health(self) -> HealthCheck:
-        """Verify Kubernetes API is reachable and the namespace is accessible."""
+        """Verify Kubernetes API is reachable and we can create pods in the namespace."""
         try:
-            self.v1.read_namespace(name=self.namespace)
+            auth_api = client.AuthorizationV1Api()
+            review = auth_api.create_self_subject_access_review(
+                body=client.V1SelfSubjectAccessReview(
+                    spec=client.V1SelfSubjectAccessReviewSpec(
+                        resource_attributes=client.V1ResourceAttributes(
+                            namespace=self.namespace,
+                            verb="create",
+                            resource="pods",
+                        )
+                    )
+                )
+            )
+            if not review.status.allowed:
+                reason = review.status.reason or "no reason provided"
+                logger.warning(
+                    f"Health check failed: cannot create pods in namespace={self.namespace} "
+                    f"(reason={reason})"
+                )
+                return HealthCheck(
+                    status="error",
+                    message=(
+                        "Service account lacks permission to create "
+                        f"pods in namespace={self.namespace}"
+                    ),
+                )
         except ApiException as e:
             return HealthCheck(
                 status="error",
