@@ -7,7 +7,7 @@ import tarfile
 import time
 import uuid
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,10 @@ from app.services.executor_base import (
 )
 
 logger = logging.getLogger(__name__)
+
+POD_DELETE_RETRIES = 3
+POD_DELETE_RETRY_DELAY_SECONDS = 0.2
+POD_DELETE_CONFIRM_TIMEOUT_SECONDS = 2.0
 
 
 def _parse_exit_code(error: str) -> int | None:
@@ -75,7 +79,11 @@ class KubernetesExecutor(BaseExecutor):
         except config.ConfigException:
             config.load_kube_config()
 
-        self.v1 = client.CoreV1Api()
+        # Keep REST calls on a dedicated ApiClient. kubernetes.stream.stream mutates
+        # the ApiClient request path for websocket exec calls, so mixing CRUD and
+        # exec traffic on one client can leave later REST calls in a broken state.
+        self._rest_api_client = client.ApiClient()
+        self.v1 = client.CoreV1Api(api_client=self._rest_api_client)
         self.namespace = KUBERNETES_EXECUTOR_NAMESPACE
         self.image = KUBERNETES_EXECUTOR_IMAGE
         self.service_account = KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
@@ -263,20 +271,42 @@ class KubernetesExecutor(BaseExecutor):
             time.sleep(0.1)
         raise RuntimeError(f"Pod {pod_name} did not become ready in {timeout_sec} seconds")
 
+    def _stream_pod_exec(
+        self,
+        pod_name: str,
+        command: list[str],
+        *,
+        stderr: bool,
+        stdin: bool,
+        stdout: bool,
+        tty: bool,
+        preload_content: bool = False,
+    ) -> Any:
+        """Run a websocket exec call using an isolated ApiClient instance."""
+        stream_api = client.CoreV1Api(api_client=client.ApiClient())
+        return stream.stream(
+            stream_api.connect_get_namespaced_pod_exec,
+            pod_name,
+            self.namespace,
+            command=command,
+            stderr=stderr,
+            stdin=stdin,
+            stdout=stdout,
+            tty=tty,
+            _preload_content=preload_content,
+        )
+
     def _upload_tar_to_pod(self, pod_name: str, tar_archive: bytes) -> None:
         """Upload and extract a tar archive into the pod's workspace."""
         logger.info(f"Uploading tar archive ({len(tar_archive)} bytes) to pod {pod_name}")
         exec_command = ["tar", "-x", "-C", "/workspace"]
-        resp = stream.stream(
-            self.v1.connect_get_namespaced_pod_exec,
+        resp = self._stream_pod_exec(
             pod_name,
-            self.namespace,
             command=exec_command,
             stderr=True,
             stdin=True,
             stdout=True,
             tty=False,
-            _preload_content=False,
         )
 
         resp.write_stdin(tar_archive)
@@ -314,17 +344,17 @@ class KubernetesExecutor(BaseExecutor):
 
     def _kill_python_process(self, pod_name: str) -> None:
         """Kill the Python process running in the pod."""
-        with suppress(Exception):
-            stream.stream(
-                self.v1.connect_get_namespaced_pod_exec,
+        try:
+            self._stream_pod_exec(
                 pod_name,
-                self.namespace,
                 command=["pkill", "-9", "python"],
                 stderr=False,
                 stdin=False,
                 stdout=False,
                 tty=False,
             )
+        except Exception:
+            logger.warning("Failed to kill Python process in pod %s", pod_name, exc_info=True)
 
     @contextmanager
     def _run_in_pod(
@@ -369,16 +399,13 @@ class KubernetesExecutor(BaseExecutor):
             start = time.perf_counter()
             exec_command = ["python", "/workspace/__main__.py"]
 
-            exec_resp = stream.stream(
-                self.v1.connect_get_namespaced_pod_exec,
+            exec_resp = self._stream_pod_exec(
                 pod_name,
-                self.namespace,
                 command=exec_command,
                 stderr=True,
                 stdin=True,
                 stdout=True,
                 tty=False,
-                _preload_content=False,
             )
 
             yield _KubeExecContext(
@@ -409,16 +436,13 @@ class KubernetesExecutor(BaseExecutor):
             ]
 
             logger.info(f"Starting tar extraction from pod {pod_name}")
-            resp = stream.stream(
-                self.v1.connect_get_namespaced_pod_exec,
+            resp = self._stream_pod_exec(
                 pod_name,
-                self.namespace,
                 command=exec_command,
                 stderr=True,
                 stdin=False,
                 stdout=True,
                 tty=False,
-                _preload_content=False,
             )
 
             base64_data = ""
@@ -485,14 +509,63 @@ class KubernetesExecutor(BaseExecutor):
             logger.error(f"Failed to extract workspace snapshot: {e}", exc_info=True)
             return tuple()
 
+    def _wait_for_pod_deleted(self, pod_name: str, timeout_sec: float) -> bool:
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            try:
+                self.v1.read_namespaced_pod(pod_name, self.namespace)
+            except ApiException as e:
+                if e.status == 404:
+                    return True
+                logger.warning(
+                    "Error while checking pod deletion for %s in namespace %s: %s",
+                    pod_name,
+                    self.namespace,
+                    e,
+                )
+                return False
+            time.sleep(0.1)
+        return False
+
     def _cleanup_pod(self, pod_name: str) -> None:
-        """Delete a pod and wait for cleanup."""
-        with suppress(ApiException):
-            self.v1.delete_namespaced_pod(
-                name=pod_name,
-                namespace=self.namespace,
-                body=client.V1DeleteOptions(grace_period_seconds=0),
-            )
+        """Delete a pod and log any cleanup failures."""
+        for attempt in range(1, POD_DELETE_RETRIES + 1):
+            try:
+                self.v1.delete_namespaced_pod(
+                    name=pod_name,
+                    namespace=self.namespace,
+                    body=client.V1DeleteOptions(grace_period_seconds=0),
+                )
+            except ApiException as e:
+                if e.status == 404:
+                    return
+                logger.warning(
+                    "Failed to delete pod %s in namespace %s on attempt %s/%s: %s",
+                    pod_name,
+                    self.namespace,
+                    attempt,
+                    POD_DELETE_RETRIES,
+                    e,
+                )
+            else:
+                if self._wait_for_pod_deleted(pod_name, POD_DELETE_CONFIRM_TIMEOUT_SECONDS):
+                    return
+                logger.warning(
+                    "Pod %s still exists after delete request on attempt %s/%s",
+                    pod_name,
+                    attempt,
+                    POD_DELETE_RETRIES,
+                )
+
+            if attempt < POD_DELETE_RETRIES:
+                time.sleep(POD_DELETE_RETRY_DELAY_SECONDS * attempt)
+
+        logger.error(
+            "Failed to confirm deletion of pod %s in namespace %s after %s attempts",
+            pod_name,
+            self.namespace,
+            POD_DELETE_RETRIES,
+        )
 
     def execute_python(
         self,
