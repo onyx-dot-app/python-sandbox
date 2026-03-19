@@ -281,7 +281,7 @@ class KubernetesExecutor(BaseExecutor):
         stdout: bool,
         tty: bool,
         preload_content: bool = False,
-    ) -> Any:
+    ) -> ws_client.WSClient:
         """Run a websocket exec call using an isolated ApiClient instance."""
         stream_api = client.CoreV1Api(api_client=client.ApiClient())
         return stream.stream(
