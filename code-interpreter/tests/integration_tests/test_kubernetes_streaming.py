@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 import tarfile
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 
 from app.services.executor_base import StreamChunk, StreamEvent, StreamResult
 from app.services.executor_kubernetes import KubernetesExecutor
@@ -32,7 +34,13 @@ def executor() -> KubernetesExecutor:
     inst.service_account = ""
     pod_mock = MagicMock()
     pod_mock.status.phase = "Running"
-    inst.v1.read_namespaced_pod.return_value = pod_mock
+
+    def _read_namespaced_pod(*args: object, **kwargs: object) -> MagicMock:
+        if inst.v1.delete_namespaced_pod.called:
+            raise ApiException(status=404)
+        return pod_mock
+
+    inst.v1.read_namespaced_pod.side_effect = _read_namespaced_pod
     return inst
 
 
@@ -325,6 +333,62 @@ def test_streaming_cleans_up_pod(executor: KubernetesExecutor) -> None:
     _run_streaming(executor, FakeExecResp())
 
     executor.v1.delete_namespaced_pod.assert_called_once()
+
+
+def test_cleanup_retries_delete_failures(
+    executor: KubernetesExecutor, caplog: pytest.LogCaptureFixture
+) -> None:
+    executor.v1.delete_namespaced_pod.side_effect = [
+        ApiException(status=500, reason="boom"),
+        None,
+    ]
+    executor.v1.read_namespaced_pod.side_effect = [
+        MagicMock(),
+        ApiException(status=404),
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        executor._cleanup_pod("code-exec-test")
+
+    assert executor.v1.delete_namespaced_pod.call_count == 2
+    assert "Failed to delete pod code-exec-test" in caplog.text
+
+
+def test_cleanup_logs_when_delete_never_succeeds(
+    executor: KubernetesExecutor, caplog: pytest.LogCaptureFixture
+) -> None:
+    executor.v1.delete_namespaced_pod.side_effect = ApiException(status=500, reason="boom")
+
+    with caplog.at_level(logging.WARNING):
+        executor._cleanup_pod("code-exec-test")
+
+    assert executor.v1.delete_namespaced_pod.call_count == 3
+    assert "Failed to delete pod code-exec-test" in caplog.text
+    assert "Failed to confirm deletion of pod code-exec-test" in caplog.text
+
+
+def test_stream_exec_uses_fresh_api_client(executor: KubernetesExecutor) -> None:
+    with (
+        patch("app.services.executor_kubernetes.client.ApiClient") as api_client_cls,
+        patch("app.services.executor_kubernetes.client.CoreV1Api") as core_v1_cls,
+        patch("app.services.executor_kubernetes.stream.stream") as mock_stream,
+    ):
+        stream_api = MagicMock()
+        core_v1_cls.return_value = stream_api
+
+        executor._stream_pod_exec(
+            "code-exec-test",
+            ["python", "/workspace/__main__.py"],
+            stderr=True,
+            stdin=True,
+            stdout=True,
+            tty=False,
+        )
+
+    api_client_cls.assert_called_once()
+    core_v1_cls.assert_called_once_with(api_client=api_client_cls.return_value)
+    assert mock_stream.call_args.args[0] is stream_api.connect_get_namespaced_pod_exec
+    assert mock_stream.call_args.kwargs["_preload_content"] is False
 
 
 def test_streaming_empty_output(executor: KubernetesExecutor) -> None:
