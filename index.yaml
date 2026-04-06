@@ -3,6 +3,28 @@ entries:
   code-interpreter:
   - apiVersion: v2
     appVersion: latest
+    created: "2026-04-06T20:54:53.545128085Z"
+    description: A Helm chart for Code Interpreter - FastAPI service to execute Python
+      code in isolated environments
+    digest: 1cb3da856cb64282c5c1bd0722f465e20f4a146003e0cd91a9033f5724aa3bf3
+    home: https://github.com/onyx-dot-app/python-sandbox
+    keywords:
+    - code-execution
+    - python
+    - fastapi
+    - sandbox
+    maintainers:
+    - email: hello@onyx.app
+      name: Onyx
+    name: code-interpreter
+    sources:
+    - https://github.com/onyx-dot-app/python-sandbox
+    type: application
+    urls:
+    - https://github.com/onyx-dot-app/python-sandbox/releases/download/code-interpreter-0.3.2/code-interpreter-0.3.2.tgz
+    version: 0.3.2
+  - apiVersion: v2
+    appVersion: latest
     created: "2026-03-02T23:21:08.579591612Z"
     description: A Helm chart for Code Interpreter - FastAPI service to execute Python
       code in isolated environments
@@ -89,4 +111,4 @@ entries:
     urls:
     - https://github.com/onyx-dot-app/code-interpreter/releases/download/code-interpreter-0.2.0/code-interpreter-0.2.0.tgz
     version: 0.2.0
-generated: "2026-03-02T23:21:08.579615237Z"
+generated: "2026-04-06T20:54:53.545150909Z"
