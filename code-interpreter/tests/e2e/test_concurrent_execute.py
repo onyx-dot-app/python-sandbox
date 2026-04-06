@@ -79,9 +79,8 @@ def test_concurrent_execute_requests_all_succeed() -> None:
                 errors.append(f"request {idx}: {exc}")
 
     # Report all failures together for easier debugging
-    assert not errors, (
-        f"{len(errors)}/{CONCURRENCY} concurrent requests failed:\n"
-        + "\n".join(errors)
+    assert not errors, f"{len(errors)}/{CONCURRENCY} concurrent requests failed:\n" + "\n".join(
+        errors
     )
 
     # Every successful response should have exit_code == 0
