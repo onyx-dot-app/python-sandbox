@@ -182,11 +182,7 @@ class KubernetesExecutor(BaseExecutor):
         # executor container as well. This eliminates the race condition
         # where the pod can send network requests before the Kubernetes
         # NetworkPolicy is enforced by the CNI.
-        iptables_script = (
-            "set -e && "
-            "iptables -A OUTPUT -j DROP && "
-            "ip6tables -A OUTPUT -j DROP"
-        )
+        iptables_script = "set -e && iptables -A OUTPUT -j DROP && ip6tables -A OUTPUT -j DROP"
         network_lockdown_container = V1Container(
             name="network-lockdown",
             image=self.image,
