@@ -6,6 +6,7 @@ RUN apt-get update \
         build-essential \
         curl \
         gfortran \
+        iptables \
         libfreetype6-dev \
         liblapack-dev \
         libopenblas-dev \
