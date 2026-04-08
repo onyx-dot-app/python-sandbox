@@ -163,19 +163,34 @@ readinessProbe:
   failureThreshold: 3
 
 # Network Policy
+# Note: this policy applies to the code-interpreter SERVICE pod, not the
+# ephemeral executor pods. Executor pods are locked down separately by the
+# `*-executor` NetworkPolicy in templates/networkpolicy.yaml.
 networkPolicy:
   enabled: true
   policyTypes:
     - Ingress
     - Egress
-  ingress: []
-  egress:
-    # Allow DNS
+  ingress:
+    # Allow ingress on the HTTP port from anywhere in the cluster (so the
+    # api-server pods can call us) AND from the node itself (so the kubelet
+    # health probes succeed). An empty `from` matches all sources.
     - ports:
-      - protocol: UDP
-        port: 53
-      - protocol: TCP
-        port: 53
+        - protocol: TCP
+          port: 8000
+  egress:
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API server — required for the kubernetes executor backend
+    # to create/exec/delete executor pods. The api-server is reached on TCP
+    # 443 inside the cluster.
+    - ports:
+        - protocol: TCP
+          port: 443
 
 # Extra environment variables
 extraEnvVars: []
