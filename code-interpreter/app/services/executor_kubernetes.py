@@ -176,7 +176,37 @@ class KubernetesExecutor(BaseExecutor):
             ],
         )
 
+        # Use iptables in an init container to drop all outbound traffic
+        # before the main executor container starts. Since all containers
+        # in a pod share a network namespace, rules set here apply to the
+        # executor container as well. This eliminates the race condition
+        # where the pod can send network requests before the Kubernetes
+        # NetworkPolicy is enforced by the CNI.
+        iptables_script = (
+            "set -e && "
+            "iptables -A OUTPUT -j DROP && "
+            "ip6tables -A OUTPUT -o lo -j ACCEPT && "
+            "ip6tables -A OUTPUT -j DROP"
+        )
+        network_lockdown_container = V1Container(
+            name="network-lockdown",
+            image=self.image,
+            command=["sh", "-c", iptables_script],
+            security_context={
+                "runAsUser": 0,
+                "runAsNonRoot": False,
+                "allowPrivilegeEscalation": False,
+                "readOnlyRootFilesystem": True,
+                "capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN"]},
+            },
+            resources={
+                "limits": {"cpu": "100m", "memory": "32Mi"},
+                "requests": {"cpu": "10m", "memory": "16Mi"},
+            },
+        )
+
         spec = V1PodSpec(
+            init_containers=[network_lockdown_container],
             containers=[container],
             restart_policy="Never",
             service_account_name=self.service_account if self.service_account else None,
