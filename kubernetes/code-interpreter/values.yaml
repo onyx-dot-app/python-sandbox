@@ -164,7 +164,7 @@ readinessProbe:
 
 # Network Policy
 networkPolicy:
-  enabled: true
+  enabled: false
   policyTypes:
     - Ingress
     - Egress

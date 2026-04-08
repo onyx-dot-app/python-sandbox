@@ -19,30 +19,4 @@ spec:
   egress:
     {{- toYaml . | nindent 4 }}
   {{- end }}
----
-# NetworkPolicy for ephemeral executor pods spawned by the code-interpreter.
-# These pods run user-submitted code and must be fully network-isolated
-# to prevent data exfiltration and SSRF attacks.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "code-interpreter.fullname" . }}-executor
-  labels:
-    {{- include "code-interpreter.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      app: code-interpreter
-      component: executor
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    # Allow exec connections from the code-interpreter service pod
-    - from:
-        - podSelector:
-            matchLabels:
-              {{- include "code-interpreter.selectorLabels" . | nindent 14 }}
-  egress: []
-  # Deny all egress — executor pods must not have network access
 {{- end }}
