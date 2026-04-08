@@ -185,7 +185,6 @@ class KubernetesExecutor(BaseExecutor):
         iptables_script = (
             "set -e && "
             "iptables -A OUTPUT -j DROP && "
-            "ip6tables -A OUTPUT -o lo -j ACCEPT && "
             "ip6tables -A OUTPUT -j DROP"
         )
         network_lockdown_container = V1Container(
