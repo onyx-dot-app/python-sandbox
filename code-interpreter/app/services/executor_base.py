@@ -106,6 +106,20 @@ class HealthCheck:
     message: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SessionInfo:
+    """Identifying information for a long-lived session."""
+
+    session_id: str
+    expires_at: float
+
+
+SESSION_NAME_PREFIX = "code-session-"
+SESSION_APP_LABEL = "code-interpreter"
+SESSION_COMPONENT_LABEL = "session"
+SESSION_EXPIRES_AT_KEY = "code-interpreter.expires-at"
+
+
 class ExecutorProtocol(Protocol):
     def execute_python(
         self,
@@ -167,6 +181,30 @@ class BaseExecutor(ABC):
         at the end. Default implementation raises NotImplementedError.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support streaming execution")
+
+    def create_session(
+        self,
+        *,
+        ttl_seconds: int,
+        files: Sequence[tuple[str, bytes]] | None = None,
+        cpu_time_limit_sec: int | None = None,
+        memory_limit_mb: int | None = None,
+    ) -> SessionInfo:
+        """Create a long-lived execution environment.
+
+        Returns identifying information for the session. The session is
+        guaranteed to be torn down at or before ``expires_at`` even if this
+        process crashes.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support sessions")
+
+    def delete_session(self, session_id: str) -> bool:
+        """Tear down a session by ID. Returns True if found and deleted."""
+        raise NotImplementedError(f"{type(self).__name__} does not support sessions")
+
+    def reap_expired_sessions(self) -> int:
+        """Delete sessions whose TTL has elapsed. Returns number reaped."""
+        return 0
 
     @staticmethod
     def truncate_output(stream: bytes, max_bytes: int) -> str:

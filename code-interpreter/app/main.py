@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from shutil import which
 from typing import Final
 
@@ -13,6 +14,8 @@ from app.api.routes import router as api_router
 from app.app_configs import EXECUTOR_BACKEND, HOST, PORT, PYTHON_EXECUTOR_DOCKER_IMAGE
 from app.models.schemas import HealthResponse
 from app.services.executor_factory import get_executor
+
+SESSION_REAPER_INTERVAL_SEC = 30
 
 # Configure logging
 logging.basicConfig(
@@ -78,6 +81,24 @@ def _ensure_docker_image_available() -> None:
         ) from e
 
 
+async def _reap_expired_sessions_once() -> None:
+    """Run a single reap pass via the configured executor."""
+    try:
+        count = await asyncio.to_thread(get_executor().reap_expired_sessions)
+    except Exception:
+        logger.warning("Session reaper pass failed", exc_info=True)
+        return
+    if count > 0:
+        logger.info("Reaped %d expired session(s)", count)
+
+
+async def _session_reaper_loop() -> None:
+    """Periodically delete sessions whose TTL has elapsed."""
+    while True:
+        await asyncio.sleep(SESSION_REAPER_INTERVAL_SEC)
+        await _reap_expired_sessions_once()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application lifespan events."""
@@ -87,9 +108,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _ensure_docker_image_available()
         logger.info("Docker executor image is ready")
 
-    yield
+    # Reap any sessions whose TTL elapsed while the service was down.
+    await _reap_expired_sessions_once()
+    reaper_task = asyncio.create_task(_session_reaper_loop())
 
-    # Shutdown: Add any cleanup logic here if needed in the future
+    try:
+        yield
+    finally:
+        reaper_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await reaper_task
 
 
 def create_app() -> FastAPI:

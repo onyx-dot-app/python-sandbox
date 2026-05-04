@@ -120,3 +120,30 @@ class ListFilesResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok", "error"]
     message: StrictStr | None = None
+
+
+DEFAULT_SESSION_TTL_SEC = 15 * 60
+MAX_SESSION_TTL_SEC = 24 * 60 * 60
+
+
+class CreateSessionRequest(BaseModel):
+    files: list[ExecuteFile] = Field(
+        default_factory=list,
+        description="Files to stage in the session workspace at create time.",
+    )
+    ttl_seconds: StrictInt = Field(
+        DEFAULT_SESSION_TTL_SEC,
+        ge=1,
+        le=MAX_SESSION_TTL_SEC,
+        description=(
+            "Session lifetime in seconds. The session pod is automatically "
+            "destroyed after this duration even if the API service crashes."
+        ),
+    )
+
+
+class CreateSessionResponse(BaseModel):
+    session_id: StrictStr = Field(..., description="Identifier for the session pod/container.")
+    expires_at: float = Field(
+        ..., description="Unix timestamp when the session is scheduled to expire."
+    )

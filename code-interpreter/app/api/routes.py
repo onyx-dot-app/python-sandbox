@@ -8,6 +8,9 @@ from fastapi.responses import Response, StreamingResponse
 
 from app.app_configs import get_settings
 from app.models.schemas import (
+    CreateSessionRequest,
+    CreateSessionResponse,
+    ExecuteFile,
     ExecuteRequest,
     ExecuteResponse,
     FileMetadataResponse,
@@ -19,7 +22,7 @@ from app.models.schemas import (
     WorkspaceFile,
 )
 from app.services.executor_base import EntryKind, StreamChunk, StreamResult, WorkspaceEntry
-from app.services.executor_factory import execute_python, execute_python_streaming
+from app.services.executor_factory import execute_python, execute_python_streaming, get_executor
 from app.services.file_storage import FileStorageService
 
 router = APIRouter()
@@ -46,8 +49,8 @@ def _validate_timeout(req: ExecuteRequest) -> None:
         )
 
 
-def _stage_request_files(
-    req: ExecuteRequest,
+def _resolve_uploaded_files(
+    files: list[ExecuteFile],
     storage: FileStorageService,
 ) -> tuple[list[tuple[str, bytes]], dict[str, bytes]]:
     """Resolve uploaded file IDs into content for the executor.
@@ -56,7 +59,7 @@ def _stage_request_files(
     """
     staged_files: list[tuple[str, bytes]] = []
     input_files_map: dict[str, bytes] = {}
-    for file in req.files:
+    for file in files:
         try:
             content, _ = storage.get_file(file.file_id)
         except FileNotFoundError as exc:
@@ -67,6 +70,17 @@ def _stage_request_files(
         staged_files.append((file.path, content))
         input_files_map[file.path] = content
     return staged_files, input_files_map
+
+
+def _stage_request_files(
+    req: ExecuteRequest,
+    storage: FileStorageService,
+) -> tuple[list[tuple[str, bytes]], dict[str, bytes]]:
+    """Resolve uploaded file IDs into content for the executor.
+
+    Returns (staged_files, input_files_map).
+    """
+    return _resolve_uploaded_files(req.files, storage)
 
 
 def _save_workspace_files(
@@ -245,6 +259,65 @@ def delete_file(file_id: str) -> Response:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"File with ID '{file_id}' not found",
+        )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/sessions",
+    response_model=CreateSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
+    """Create a long-lived code-executor pod with the given TTL.
+
+    The pod is guaranteed to be torn down at or before the TTL expires, even
+    if the API service crashes and restarts.
+    """
+    settings = get_settings()
+    storage = get_file_storage()
+    staged_files, _ = _resolve_uploaded_files(req.files, storage)
+
+    try:
+        info = get_executor().create_session(
+            ttl_seconds=req.ttl_seconds,
+            files=staged_files,
+            cpu_time_limit_sec=settings.cpu_time_limit_sec,
+            memory_limit_mb=settings.memory_limit_mb,
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    return CreateSessionResponse(
+        session_id=info.session_id,
+        expires_at=info.expires_at,
+    )
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_session(session_id: str) -> Response:
+    """Tear down a session pod by ID."""
+    try:
+        deleted = get_executor().delete_session(session_id)
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(exc),
+        ) from exc
+
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session '{session_id}' not found",
         )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
