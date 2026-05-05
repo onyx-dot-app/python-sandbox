@@ -76,7 +76,10 @@ def _stage_request_files(
     req: ExecuteRequest,
     storage: FileStorageService,
 ) -> tuple[list[tuple[str, bytes]], dict[str, bytes]]:
-    """Resolve uploaded file IDs into content for the executor."""
+    """Resolve uploaded file IDs into content for the executor.
+
+    Returns (staged_files, input_files_map).
+    """
     return _resolve_uploaded_files(req.files, storage)
 
 
@@ -267,9 +270,10 @@ def delete_file(file_id: str) -> Response:
     status_code=status.HTTP_201_CREATED,
 )
 def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
-    """Create a long-lived code-executor pod.
+    """Create a long-lived code-executor pod with the given TTL.
 
-    The session must be torn down explicitly via DELETE /v1/sessions/{id}.
+    The pod is guaranteed to be torn down at or before the TTL expires, even
+    if the API service crashes and restarts.
     """
     settings = get_settings()
     storage = get_file_storage()
@@ -277,6 +281,7 @@ def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
 
     try:
         info = get_executor().create_session(
+            ttl_seconds=req.ttl_seconds,
             files=staged_files,
             cpu_time_limit_sec=settings.cpu_time_limit_sec,
             memory_limit_mb=settings.memory_limit_mb,
@@ -292,7 +297,10 @@ def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
             detail=str(exc),
         ) from exc
 
-    return CreateSessionResponse(session_id=info.session_id)
+    return CreateSessionResponse(
+        session_id=info.session_id,
+        expires_at=info.expires_at,
+    )
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -23,6 +23,7 @@ from app.app_configs import (
 from app.services.executor_base import (
     SESSION_APP_LABEL,
     SESSION_COMPONENT_LABEL,
+    SESSION_EXPIRES_AT_KEY,
     SESSION_NAME_PREFIX,
     BaseExecutor,
     EntryKind,
@@ -37,10 +38,6 @@ from app.services.executor_base import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Sessions keep their idle container alive for at most this many seconds; a
-# follow-up PR replaces this with a per-session TTL plus a reaper.
-SESSION_MAX_LIFETIME_SECONDS = 24 * 60 * 60
 
 
 @dataclass
@@ -405,20 +402,23 @@ class DockerExecutor(BaseExecutor):
     def create_session(
         self,
         *,
+        ttl_seconds: int,
         files: Sequence[tuple[str, bytes]] | None = None,
         cpu_time_limit_sec: int | None = None,
         memory_limit_mb: int | None = None,
     ) -> SessionInfo:
         container_name = f"{SESSION_NAME_PREFIX}{uuid.uuid4().hex}"
+        expires_at = time.time() + ttl_seconds
 
         cmd = self._build_run_command(
             container_name=container_name,
             cpu_time_limit_sec=cpu_time_limit_sec,
             memory_limit_mb=memory_limit_mb,
-            sleep_seconds=SESSION_MAX_LIFETIME_SECONDS,
+            sleep_seconds=ttl_seconds,
             labels={
                 "app": SESSION_APP_LABEL,
                 "component": SESSION_COMPONENT_LABEL,
+                SESSION_EXPIRES_AT_KEY: str(expires_at),
             },
         )
         start_proc = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
@@ -433,8 +433,8 @@ class DockerExecutor(BaseExecutor):
             self._kill_container(container_name)
             raise
 
-        logger.info("Created session container %s", container_name)
-        return SessionInfo(session_id=container_name)
+        logger.info("Created session container %s (expires at %s)", container_name, expires_at)
+        return SessionInfo(session_id=container_name, expires_at=expires_at)
 
     def delete_session(self, session_id: str) -> bool:
         if not session_id.startswith(SESSION_NAME_PREFIX):
@@ -444,14 +444,63 @@ class DockerExecutor(BaseExecutor):
             capture_output=True,
             text=True,
         )
-        # `docker rm -f <missing>` exits 0 on modern Docker, so check stderr
-        # for the "not found" message regardless of exit code.
+        if result.returncode == 0:
+            return True
+        # docker rm -f exits non-zero only when the container does not exist.
         stderr = (result.stderr or "").lower()
         if "no such container" in stderr or "not found" in stderr:
             return False
-        if result.returncode == 0:
-            return True
         raise RuntimeError(f"Failed to delete session {session_id}: {result.stderr}")
+
+    def reap_expired_sessions(self) -> int:
+        list_cmd = [
+            self.docker_binary,
+            "ps",
+            "-a",
+            "--filter",
+            f"label=app={SESSION_APP_LABEL}",
+            "--filter",
+            f"label=component={SESSION_COMPONENT_LABEL}",
+            "--format",
+            '{{.Names}}\t{{.Label "' + SESSION_EXPIRES_AT_KEY + '"}}',
+        ]
+        try:
+            list_result = subprocess.run(  # nosec B603
+                list_cmd, capture_output=True, text=True, timeout=10
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Timed out listing session containers for reap")
+            return 0
+
+        if list_result.returncode != 0:
+            logger.warning("Failed to list session containers: %s", list_result.stderr)
+            return 0
+
+        now = time.time()
+        reaped = 0
+        for line in list_result.stdout.splitlines():
+            name, _, expires_str = line.partition("\t")
+            name = name.strip()
+            expires_str = expires_str.strip()
+            if not name or not expires_str:
+                continue
+            try:
+                expires_at = float(expires_str)
+            except ValueError:
+                continue
+            if expires_at >= now:
+                continue
+            rm_result = subprocess.run(  # nosec B603
+                [self.docker_binary, "rm", "-f", name],
+                capture_output=True,
+                text=True,
+            )
+            if rm_result.returncode == 0:
+                reaped += 1
+                logger.info("Reaped expired session container %s", name)
+            else:
+                logger.warning("Failed to reap session container %s: %s", name, rm_result.stderr)
+        return reaped
 
     def execute_python(
         self,

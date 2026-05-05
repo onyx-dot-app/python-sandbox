@@ -30,6 +30,7 @@ from app.app_configs import (
 from app.services.executor_base import (
     SESSION_APP_LABEL,
     SESSION_COMPONENT_LABEL,
+    SESSION_EXPIRES_AT_KEY,
     SESSION_NAME_PREFIX,
     BaseExecutor,
     EntryKind,
@@ -49,9 +50,7 @@ POD_DELETE_RETRIES = 3
 POD_DELETE_RETRY_DELAY_SECONDS = 0.2
 POD_DELETE_CONFIRM_TIMEOUT_SECONDS = 2.0
 
-# Sessions keep their idle pod alive for at most this many seconds; a follow-up
-# PR replaces this with a per-session TTL plus a reaper.
-SESSION_MAX_LIFETIME_SECONDS = 24 * 60 * 60
+SESSION_LABEL_SELECTOR = f"app={SESSION_APP_LABEL},component={SESSION_COMPONENT_LABEL}"
 
 
 def _parse_exit_code(error: str) -> int | None:
@@ -607,21 +606,30 @@ class KubernetesExecutor(BaseExecutor):
     def create_session(
         self,
         *,
+        ttl_seconds: int,
         files: Sequence[tuple[str, bytes]] | None = None,
         cpu_time_limit_sec: int | None = None,
         memory_limit_mb: int | None = None,
     ) -> SessionInfo:
         pod_name = f"{SESSION_NAME_PREFIX}{uuid.uuid4().hex}"
+        expires_at = time.time() + ttl_seconds
 
         manifest = self._create_pod_manifest(
             pod_name=pod_name,
-            command=["sleep", str(SESSION_MAX_LIFETIME_SECONDS)],
+            command=["sleep", str(ttl_seconds)],
             labels={"app": SESSION_APP_LABEL, "component": SESSION_COMPONENT_LABEL},
+            annotations={SESSION_EXPIRES_AT_KEY: str(expires_at)},
+            active_deadline_seconds=ttl_seconds,
             memory_limit_mb=memory_limit_mb,
             cpu_time_limit_sec=cpu_time_limit_sec,
         )
 
-        logger.info("Creating session pod %s in namespace %s", pod_name, self.namespace)
+        logger.info(
+            "Creating session pod %s in namespace %s (ttl=%ss)",
+            pod_name,
+            self.namespace,
+            ttl_seconds,
+        )
         self.v1.create_namespaced_pod(namespace=self.namespace, body=manifest)
 
         try:
@@ -633,7 +641,7 @@ class KubernetesExecutor(BaseExecutor):
             self._cleanup_pod(pod_name)
             raise
 
-        return SessionInfo(session_id=pod_name)
+        return SessionInfo(session_id=pod_name, expires_at=expires_at)
 
     def delete_session(self, session_id: str) -> bool:
         if not session_id.startswith(SESSION_NAME_PREFIX):
@@ -649,6 +657,50 @@ class KubernetesExecutor(BaseExecutor):
                 return False
             raise
         return True
+
+    def reap_expired_sessions(self) -> int:
+        try:
+            pods = self.v1.list_namespaced_pod(
+                namespace=self.namespace,
+                label_selector=SESSION_LABEL_SELECTOR,
+            )
+        except ApiException as e:
+            logger.warning("Failed to list session pods for reap: %s", e)
+            return 0
+
+        now = time.time()
+        reaped = 0
+        for pod in pods.items:
+            metadata = pod.metadata
+            annotations = metadata.annotations or {}
+            expires_str = annotations.get(SESSION_EXPIRES_AT_KEY)
+            if expires_str is None:
+                continue
+            try:
+                expires_at = float(expires_str)
+            except ValueError:
+                logger.warning(
+                    "Session pod %s has invalid expires-at annotation %r",
+                    metadata.name,
+                    expires_str,
+                )
+                continue
+            if expires_at >= now:
+                continue
+            try:
+                self.v1.delete_namespaced_pod(
+                    name=metadata.name,
+                    namespace=self.namespace,
+                    body=client.V1DeleteOptions(grace_period_seconds=0),
+                )
+            except ApiException as e:
+                if e.status == 404:
+                    continue
+                logger.warning("Failed to reap session pod %s: %s", metadata.name, e)
+                continue
+            reaped += 1
+            logger.info("Reaped expired session pod %s", metadata.name)
+        return reaped
 
     def execute_python(
         self,

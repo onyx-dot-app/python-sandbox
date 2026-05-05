@@ -24,9 +24,11 @@ def _clear_executor_cache() -> Generator[None, None, None]:
     get_executor.cache_clear()
 
 
-def test_create_session_returns_session_id() -> None:
+def test_create_session_returns_id_and_expires_at() -> None:
     mock_executor = MagicMock()
-    mock_executor.create_session.return_value = SessionInfo(session_id="code-session-abc")
+    mock_executor.create_session.return_value = SessionInfo(
+        session_id="code-session-abc", expires_at=12345.6
+    )
 
     with patch("app.api.routes.get_executor", return_value=mock_executor):
         client = TestClient(create_app())
@@ -35,6 +37,45 @@ def test_create_session_returns_session_id() -> None:
     assert response.status_code == 201
     body = response.json()
     assert body["session_id"] == "code-session-abc"
+    assert body["expires_at"] == 12345.6
+
+
+def test_create_session_defaults_ttl_to_15_minutes() -> None:
+    mock_executor = MagicMock()
+    mock_executor.create_session.return_value = SessionInfo(
+        session_id="code-session-x", expires_at=0.0
+    )
+
+    with patch("app.api.routes.get_executor", return_value=mock_executor):
+        client = TestClient(create_app())
+        client.post("/v1/sessions", json={})
+
+    assert mock_executor.create_session.call_args.kwargs["ttl_seconds"] == 900
+
+
+def test_create_session_uses_provided_ttl() -> None:
+    mock_executor = MagicMock()
+    mock_executor.create_session.return_value = SessionInfo(
+        session_id="code-session-x", expires_at=0.0
+    )
+
+    with patch("app.api.routes.get_executor", return_value=mock_executor):
+        client = TestClient(create_app())
+        client.post("/v1/sessions", json={"ttl_seconds": 300})
+
+    assert mock_executor.create_session.call_args.kwargs["ttl_seconds"] == 300
+
+
+def test_create_session_rejects_non_positive_ttl() -> None:
+    client = TestClient(create_app())
+    response = client.post("/v1/sessions", json={"ttl_seconds": 0})
+    assert response.status_code == 422
+
+
+def test_create_session_rejects_oversized_ttl() -> None:
+    client = TestClient(create_app())
+    response = client.post("/v1/sessions", json={"ttl_seconds": 86_401})
+    assert response.status_code == 422
 
 
 def test_create_session_returns_404_for_unknown_file_id() -> None:
@@ -57,7 +98,9 @@ def test_create_session_resolves_file_ids_into_content() -> None:
     file_id = upload_resp.json()["file_id"]
 
     mock_executor = MagicMock()
-    mock_executor.create_session.return_value = SessionInfo(session_id="code-session-x")
+    mock_executor.create_session.return_value = SessionInfo(
+        session_id="code-session-x", expires_at=0.0
+    )
 
     with patch("app.api.routes.get_executor", return_value=mock_executor):
         response = client.post(
