@@ -21,10 +21,14 @@ from app.app_configs import (
     PYTHON_EXECUTOR_DOCKER_RUN_ARGS,
 )
 from app.services.executor_base import (
+    SESSION_APP_LABEL,
+    SESSION_COMPONENT_LABEL,
+    SESSION_NAME_PREFIX,
     BaseExecutor,
     EntryKind,
     ExecutionResult,
     HealthCheck,
+    SessionInfo,
     StreamChunk,
     StreamEvent,
     StreamResult,
@@ -33,6 +37,10 @@ from app.services.executor_base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Sessions keep their idle container alive for at most this many seconds; a
+# follow-up PR replaces this with a per-session TTL plus a reaper.
+SESSION_MAX_LIFETIME_SECONDS = 24 * 60 * 60
 
 
 @dataclass
@@ -393,6 +401,57 @@ class DockerExecutor(BaseExecutor):
             )
         finally:
             self._kill_container(container_name)
+
+    def create_session(
+        self,
+        *,
+        files: Sequence[tuple[str, bytes]] | None = None,
+        cpu_time_limit_sec: int | None = None,
+        memory_limit_mb: int | None = None,
+    ) -> SessionInfo:
+        container_name = f"{SESSION_NAME_PREFIX}{uuid.uuid4().hex}"
+
+        cmd = self._build_run_command(
+            container_name=container_name,
+            cpu_time_limit_sec=cpu_time_limit_sec,
+            memory_limit_mb=memory_limit_mb,
+            sleep_seconds=SESSION_MAX_LIFETIME_SECONDS,
+            labels={
+                "app": SESSION_APP_LABEL,
+                "component": SESSION_COMPONENT_LABEL,
+            },
+        )
+        start_proc = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
+        if start_proc.returncode != 0:
+            raise RuntimeError(f"Failed to start session container: {start_proc.stderr}")
+
+        try:
+            if files:
+                tar_archive = self._create_tar_archive(files=files)
+                self._upload_tar_to_container(container_name, tar_archive)
+        except Exception:
+            self._kill_container(container_name)
+            raise
+
+        logger.info("Created session container %s", container_name)
+        return SessionInfo(session_id=container_name)
+
+    def delete_session(self, session_id: str) -> bool:
+        if not session_id.startswith(SESSION_NAME_PREFIX):
+            return False
+        result = subprocess.run(  # nosec B603
+            [self.docker_binary, "rm", "-f", session_id],
+            capture_output=True,
+            text=True,
+        )
+        # `docker rm -f <missing>` exits 0 on modern Docker, so check stderr
+        # for the "not found" message regardless of exit code.
+        stderr = (result.stderr or "").lower()
+        if "no such container" in stderr or "not found" in stderr:
+            return False
+        if result.returncode == 0:
+            return True
+        raise RuntimeError(f"Failed to delete session {session_id}: {result.stderr}")
 
     def execute_python(
         self,
