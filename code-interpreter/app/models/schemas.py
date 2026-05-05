@@ -147,3 +147,23 @@ class CreateSessionResponse(BaseModel):
     expires_at: float = Field(
         ..., description="Unix timestamp when the session is scheduled to expire."
     )
+
+
+DEFAULT_BASH_TIMEOUT_MS = 30_000
+
+
+class BashExecRequest(BaseModel):
+    cmd: StrictStr = Field(..., description="Bash command to execute in the session.")
+    timeout_ms: StrictInt = Field(
+        DEFAULT_BASH_TIMEOUT_MS,
+        ge=1,
+        description="Per-command execution timeout in milliseconds.",
+    )
+
+
+class BashExecResponse(BaseModel):
+    stdout: StrictStr
+    stderr: StrictStr
+    exit_code: int | None
+    timed_out: bool
+    duration_ms: StrictInt

@@ -37,6 +37,7 @@ from app.services.executor_base import (
     ExecutionResult,
     HealthCheck,
     SessionInfo,
+    SessionNotFoundError,
     StreamChunk,
     StreamEvent,
     StreamResult,
@@ -376,19 +377,63 @@ class KubernetesExecutor(BaseExecutor):
                 f"stderr: {tar_stderr.decode('utf-8', errors='replace')}"
             )
 
-    def _kill_python_process(self, pod_name: str) -> None:
-        """Kill the Python process running in the pod."""
+    def _kill_processes_in_pod(self, pod_name: str, process_name: str) -> None:
+        """Best-effort SIGKILL of all processes named ``process_name`` in the pod."""
         try:
             self._stream_pod_exec(
                 pod_name,
-                command=["pkill", "-9", "python"],
+                command=["pkill", "-9", process_name],
                 stderr=False,
                 stdin=False,
                 stdout=False,
                 tty=False,
             )
         except Exception:
-            logger.warning("Failed to kill Python process in pod %s", pod_name, exc_info=True)
+            logger.warning(
+                "Failed to kill %s process in pod %s", process_name, pod_name, exc_info=True
+            )
+
+    def _kill_python_process(self, pod_name: str) -> None:
+        """Kill the Python process running in the pod."""
+        self._kill_processes_in_pod(pod_name, "python")
+
+    def _drain_exec_stream(
+        self,
+        exec_resp: ws_client.WSClient,
+        timeout_ms: int,
+    ) -> tuple[bytes, bytes, int | None, bool]:
+        """Read stdout/stderr from an exec stream until completion or timeout.
+
+        Returns ``(stdout_bytes, stderr_bytes, exit_code, timed_out)``.
+        """
+        stdout_data = b""
+        stderr_data = b""
+        exit_code: int | None = None
+        timed_out = False
+
+        end_time = time.time() + timeout_ms / 1000.0
+
+        while exec_resp.is_open():
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                timed_out = True
+                break
+
+            exec_resp.update(timeout=min(remaining, 1))
+
+            if exec_resp.peek_stdout():
+                stdout_data += exec_resp.read_stdout().encode("utf-8")
+
+            if exec_resp.peek_stderr():
+                stderr_data += exec_resp.read_stderr().encode("utf-8")
+
+            error = exec_resp.read_channel(ws_client.ERROR_CHANNEL)
+            if error:
+                exit_code = _parse_exit_code(error)
+                break
+
+        exec_resp.close()
+        return stdout_data, stderr_data, exit_code, timed_out
 
     @contextmanager
     def _run_in_pod(
@@ -702,6 +747,56 @@ class KubernetesExecutor(BaseExecutor):
             logger.info("Reaped expired session pod %s", metadata.name)
         return reaped
 
+    def execute_bash_in_session(
+        self,
+        session_id: str,
+        *,
+        cmd: str,
+        timeout_ms: int,
+        max_output_bytes: int,
+    ) -> ExecutionResult:
+        """Run a bash command inside an existing session pod.
+
+        Network restrictions established at pod creation (the iptables init
+        container) remain in force — exec inherits the pod's network namespace.
+        """
+        if not session_id.startswith(SESSION_NAME_PREFIX):
+            raise SessionNotFoundError(session_id)
+
+        try:
+            self.v1.read_namespaced_pod(session_id, self.namespace)
+        except ApiException as e:
+            if e.status == 404:
+                raise SessionNotFoundError(session_id) from e
+            raise
+
+        start = time.perf_counter()
+        exec_resp = self._stream_pod_exec(
+            session_id,
+            command=["bash", "-c", cmd],
+            stderr=True,
+            stdin=False,
+            stdout=True,
+            tty=False,
+        )
+
+        stdout_data, stderr_data, exit_code, timed_out = self._drain_exec_stream(
+            exec_resp, timeout_ms
+        )
+
+        if timed_out:
+            self._kill_processes_in_pod(session_id, "bash")
+
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        return ExecutionResult(
+            stdout=self.truncate_output(stdout_data, max_output_bytes),
+            stderr=self.truncate_output(stderr_data, max_output_bytes),
+            exit_code=None if timed_out else exit_code,
+            timed_out=timed_out,
+            duration_ms=duration_ms,
+            files=tuple(),
+        )
+
     def execute_python(
         self,
         *,
@@ -731,34 +826,9 @@ class KubernetesExecutor(BaseExecutor):
                 logger.debug("Writing stdin to Python process")
                 ctx.exec_resp.write_stdin(stdin)
 
-            stdout_data = b""
-            stderr_data = b""
-            exit_code: int | None = None
-            timed_out = False
-
-            timeout_sec = timeout_ms / 1000.0
-            end_time = time.time() + timeout_sec
-
-            while ctx.exec_resp.is_open():
-                remaining = end_time - time.time()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-
-                ctx.exec_resp.update(timeout=min(remaining, 1))
-
-                if ctx.exec_resp.peek_stdout():
-                    stdout_data += ctx.exec_resp.read_stdout().encode("utf-8")
-
-                if ctx.exec_resp.peek_stderr():
-                    stderr_data += ctx.exec_resp.read_stderr().encode("utf-8")
-
-                error = ctx.exec_resp.read_channel(ws_client.ERROR_CHANNEL)
-                if error:
-                    exit_code = _parse_exit_code(error)
-                    break
-
-            ctx.exec_resp.close()
+            stdout_data, stderr_data, exit_code, timed_out = self._drain_exec_stream(
+                ctx.exec_resp, timeout_ms
+            )
 
             if timed_out:
                 self._kill_python_process(ctx.pod_name)

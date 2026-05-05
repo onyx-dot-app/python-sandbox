@@ -30,6 +30,7 @@ from app.services.executor_base import (
     ExecutionResult,
     HealthCheck,
     SessionInfo,
+    SessionNotFoundError,
     StreamChunk,
     StreamEvent,
     StreamResult,
@@ -38,6 +39,12 @@ from app.services.executor_base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _looks_like_missing_container(stderr: bytes) -> bool:
+    """Heuristic: ``docker exec`` writes these to stderr when the target is gone."""
+    text = stderr.decode("utf-8", errors="replace").lower()
+    return "no such container" in text or "is not running" in text
 
 
 @dataclass
@@ -501,6 +508,71 @@ class DockerExecutor(BaseExecutor):
             else:
                 logger.warning("Failed to reap session container %s: %s", name, rm_result.stderr)
         return reaped
+
+    def execute_bash_in_session(
+        self,
+        session_id: str,
+        *,
+        cmd: str,
+        timeout_ms: int,
+        max_output_bytes: int,
+    ) -> ExecutionResult:
+        """Run a bash command inside an existing session container.
+
+        The container was created with ``--network none`` at session-create time
+        and that network namespace is what the exec inherits — no additional
+        flags are needed (or accepted) for ``docker exec``.
+        """
+        if not session_id.startswith(SESSION_NAME_PREFIX):
+            raise SessionNotFoundError(session_id)
+
+        exec_cmd = [
+            self.docker_binary,
+            "exec",
+            "-u",
+            "65532:65532",
+            session_id,
+            "bash",
+            "-c",
+            cmd,
+        ]
+
+        start = time.perf_counter()
+        proc = subprocess.Popen(  # nosec B603
+            exec_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        try:
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout_ms / 1000.0)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            # Kill bash inside the container; pkill matches all bash procs in the
+            # container — acceptable since the agent runs commands sequentially.
+            subprocess.run(  # nosec B603
+                [self.docker_binary, "exec", session_id, "pkill", "-9", "bash"],
+                capture_output=True,
+            )
+            proc.kill()
+            stdout_bytes, stderr_bytes = proc.communicate()
+
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        exit_code = None if timed_out else proc.returncode
+
+        if not timed_out and proc.returncode != 0 and _looks_like_missing_container(stderr_bytes):
+            raise SessionNotFoundError(session_id)
+
+        return ExecutionResult(
+            stdout=self.truncate_output(stdout_bytes or b"", max_output_bytes),
+            stderr=self.truncate_output(stderr_bytes or b"", max_output_bytes),
+            exit_code=exit_code,
+            timed_out=timed_out,
+            duration_ms=duration_ms,
+            files=tuple(),
+        )
 
     def execute_python(
         self,

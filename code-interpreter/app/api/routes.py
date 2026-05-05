@@ -8,6 +8,8 @@ from fastapi.responses import Response, StreamingResponse
 
 from app.app_configs import get_settings
 from app.models.schemas import (
+    BashExecRequest,
+    BashExecResponse,
     CreateSessionRequest,
     CreateSessionResponse,
     ExecuteFile,
@@ -21,7 +23,13 @@ from app.models.schemas import (
     UploadFileResponse,
     WorkspaceFile,
 )
-from app.services.executor_base import EntryKind, StreamChunk, StreamResult, WorkspaceEntry
+from app.services.executor_base import (
+    EntryKind,
+    SessionNotFoundError,
+    StreamChunk,
+    StreamResult,
+    WorkspaceEntry,
+)
 from app.services.executor_factory import execute_python, execute_python_streaming, get_executor
 from app.services.file_storage import FileStorageService
 
@@ -321,3 +329,48 @@ def delete_session(session_id: str) -> Response:
         )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/sessions/{session_id}/bash",
+    response_model=BashExecResponse,
+    status_code=status.HTTP_200_OK,
+)
+def session_exec_bash(session_id: str, req: BashExecRequest) -> BashExecResponse:
+    """Run a bash command inside an existing session.
+
+    The session pod has no network access (enforced at session creation), and
+    that restriction continues to apply for every command run via this route.
+    """
+    settings = get_settings()
+    if req.timeout_ms > settings.max_exec_timeout_ms:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"timeout_ms exceeds maximum of {settings.max_exec_timeout_ms} ms",
+        )
+
+    try:
+        result = get_executor().execute_bash_in_session(
+            session_id,
+            cmd=req.cmd,
+            timeout_ms=req.timeout_ms,
+            max_output_bytes=settings.max_output_bytes,
+        )
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(exc),
+        ) from exc
+
+    return BashExecResponse(
+        stdout=result.stdout,
+        stderr=result.stderr,
+        exit_code=result.exit_code,
+        timed_out=result.timed_out,
+        duration_ms=result.duration_ms,
+    )
