@@ -28,10 +28,14 @@ from app.app_configs import (
     KUBERNETES_EXECUTOR_SERVICE_ACCOUNT,
 )
 from app.services.executor_base import (
+    SESSION_APP_LABEL,
+    SESSION_COMPONENT_LABEL,
+    SESSION_NAME_PREFIX,
     BaseExecutor,
     EntryKind,
     ExecutionResult,
     HealthCheck,
+    SessionInfo,
     StreamChunk,
     StreamEvent,
     StreamResult,
@@ -44,6 +48,10 @@ logger = logging.getLogger(__name__)
 POD_DELETE_RETRIES = 3
 POD_DELETE_RETRY_DELAY_SECONDS = 0.2
 POD_DELETE_CONFIRM_TIMEOUT_SECONDS = 2.0
+
+# Sessions keep their idle pod alive for at most this many seconds; a follow-up
+# PR replaces this with a per-session TTL plus a reaper.
+SESSION_MAX_LIFETIME_SECONDS = 24 * 60 * 60
 
 
 def _parse_exit_code(error: str) -> int | None:
@@ -595,6 +603,52 @@ class KubernetesExecutor(BaseExecutor):
             self.namespace,
             POD_DELETE_RETRIES,
         )
+
+    def create_session(
+        self,
+        *,
+        files: Sequence[tuple[str, bytes]] | None = None,
+        cpu_time_limit_sec: int | None = None,
+        memory_limit_mb: int | None = None,
+    ) -> SessionInfo:
+        pod_name = f"{SESSION_NAME_PREFIX}{uuid.uuid4().hex}"
+
+        manifest = self._create_pod_manifest(
+            pod_name=pod_name,
+            command=["sleep", str(SESSION_MAX_LIFETIME_SECONDS)],
+            labels={"app": SESSION_APP_LABEL, "component": SESSION_COMPONENT_LABEL},
+            memory_limit_mb=memory_limit_mb,
+            cpu_time_limit_sec=cpu_time_limit_sec,
+        )
+
+        logger.info("Creating session pod %s in namespace %s", pod_name, self.namespace)
+        self.v1.create_namespaced_pod(namespace=self.namespace, body=manifest)
+
+        try:
+            self._wait_for_pod_ready(pod_name)
+            if files:
+                tar_archive = self._create_tar_archive(files=files)
+                self._upload_tar_to_pod(pod_name, tar_archive)
+        except Exception:
+            self._cleanup_pod(pod_name)
+            raise
+
+        return SessionInfo(session_id=pod_name)
+
+    def delete_session(self, session_id: str) -> bool:
+        if not session_id.startswith(SESSION_NAME_PREFIX):
+            return False
+        try:
+            self.v1.delete_namespaced_pod(
+                name=session_id,
+                namespace=self.namespace,
+                body=client.V1DeleteOptions(grace_period_seconds=0),
+            )
+        except ApiException as e:
+            if e.status == 404:
+                return False
+            raise
+        return True
 
     def execute_python(
         self,

@@ -120,3 +120,14 @@ class ListFilesResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok", "error"]
     message: StrictStr | None = None
+
+
+class CreateSessionRequest(BaseModel):
+    files: list[ExecuteFile] = Field(
+        default_factory=list,
+        description="Files to stage in the session workspace at create time.",
+    )
+
+
+class CreateSessionResponse(BaseModel):
+    session_id: StrictStr = Field(..., description="Identifier for the session pod/container.")
