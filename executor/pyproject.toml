@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "executor"
-version = "0.1.0"
+version = "0.3.3"
 description = "Dependency bundle for the code interpreter executor image"
 requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
