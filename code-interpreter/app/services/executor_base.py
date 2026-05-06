@@ -120,6 +120,14 @@ SESSION_COMPONENT_LABEL = "session"
 SESSION_EXPIRES_AT_KEY = "code-interpreter.expires-at"
 
 
+class SessionNotFoundError(LookupError):
+    """Raised when a session ID does not refer to an existing session."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"Session '{session_id}' not found")
+        self.session_id = session_id
+
+
 class ExecutorProtocol(Protocol):
     def execute_python(
         self,
@@ -205,6 +213,21 @@ class BaseExecutor(ABC):
     def reap_expired_sessions(self) -> int:
         """Delete sessions whose TTL has elapsed. Returns number reaped."""
         return 0
+
+    def execute_bash_in_session(
+        self,
+        session_id: str,
+        *,
+        cmd: str,
+        timeout_ms: int,
+        max_output_bytes: int,
+    ) -> ExecutionResult:
+        """Run a bash command inside an existing session.
+
+        Raises ``SessionNotFoundError`` when the session does not exist.
+        Network restrictions established at session creation remain in force.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support sessions")
 
     @staticmethod
     def truncate_output(stream: bytes, max_bytes: int) -> str:
