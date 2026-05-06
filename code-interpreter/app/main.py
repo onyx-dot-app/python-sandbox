@@ -4,8 +4,7 @@ import asyncio
 import logging
 import subprocess
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import version as _package_version
 from shutil import which
 from typing import Final
