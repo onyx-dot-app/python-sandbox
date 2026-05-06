@@ -462,7 +462,7 @@ class DockerExecutor(BaseExecutor):
             "--filter",
             f"label=component={SESSION_COMPONENT_LABEL}",
             "--format",
-            '{{.Names}}\t{{.Label "' + SESSION_EXPIRES_AT_KEY + '"}}',
+            f'{{{{.Names}}}}\t{{{{.Label "{SESSION_EXPIRES_AT_KEY}"}}}}',
         ]
         try:
             list_result = subprocess.run(  # nosec B603
