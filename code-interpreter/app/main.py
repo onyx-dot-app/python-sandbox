@@ -4,7 +4,9 @@ import asyncio
 import logging
 import subprocess
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
+from contextlib import suppress
+from importlib.metadata import version as _package_version
 from shutil import which
 from typing import Final
 
@@ -24,6 +26,8 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+SERVICE_VERSION: Final[str] = _package_version("code-interpreter")
 
 
 def _ensure_docker_image_available() -> None:
@@ -123,7 +127,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Code Interpreter API",
-        version="0.1.0",
+        version=SERVICE_VERSION,
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -134,7 +138,11 @@ def create_app() -> FastAPI:
     def health() -> HealthResponse:
         """Health check that verifies the executor backend is operational."""
         result = get_executor().check_health()
-        return HealthResponse(status=result.status, message=result.message)
+        return HealthResponse(
+            status=result.status,
+            message=result.message,
+            version=SERVICE_VERSION,
+        )
 
     app.include_router(api_router, prefix="/v1")
     return app

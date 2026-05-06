@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import create_app
+from app.main import SERVICE_VERSION, create_app
 from app.services.executor_base import HealthCheck
 from app.services.executor_docker import DockerExecutor
 from app.services.executor_factory import get_executor
@@ -29,6 +29,7 @@ def test_health_returns_ok_when_backend_healthy() -> None:
     body = response.json()
     assert body["status"] == "ok"
     assert body["message"] is None
+    assert body["version"] == SERVICE_VERSION
 
 
 def test_health_returns_error_when_backend_unhealthy() -> None:
@@ -42,6 +43,14 @@ def test_health_returns_error_when_backend_unhealthy() -> None:
     body = response.json()
     assert body["status"] == "error"
     assert body["message"] == "daemon down"
+    assert body["version"] == SERVICE_VERSION
+
+
+def test_health_version_matches_package_metadata() -> None:
+    """The version should come from the installed package, not be hardcoded."""
+    from importlib.metadata import version as package_version
+
+    assert package_version("code-interpreter") == SERVICE_VERSION
 
 
 def _make_completed(returncode: int, stderr: bytes = b"") -> subprocess.CompletedProcess[bytes]:

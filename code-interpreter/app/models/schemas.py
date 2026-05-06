@@ -120,6 +120,13 @@ class ListFilesResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok", "error"]
     message: StrictStr | None = None
+    version: StrictStr = Field(
+        ...,
+        description=(
+            "Semver of the running service. Clients can compare against a "
+            "required minimum to detect whether new functionality is available."
+        ),
+    )
 
 
 DEFAULT_SESSION_TTL_SEC = 15 * 60
