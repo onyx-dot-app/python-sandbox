@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "code-interpreter"
-version = "0.1.0"
+version = "0.3.3"
 description = "FastAPI service to execute Python code (sync, typed)"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
