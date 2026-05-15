@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from app.api.routes import router as api_router
 from app.app_configs import EXECUTOR_BACKEND, HOST, PORT, PYTHON_EXECUTOR_DOCKER_IMAGE
+from app.image_ref import normalize_image_ref
 from app.models.schemas import HealthResponse
 from app.services.executor_factory import get_executor
 
@@ -41,7 +42,7 @@ def _ensure_docker_image_available() -> None:
         logger.warning("Docker binary not found, skipping image check")
         return
 
-    image_with_tag = f"{PYTHON_EXECUTOR_DOCKER_IMAGE}:latest"
+    image_with_tag = normalize_image_ref(PYTHON_EXECUTOR_DOCKER_IMAGE)
 
     # Check if image exists locally
     logger.info(f"Checking for Docker image: {image_with_tag}")

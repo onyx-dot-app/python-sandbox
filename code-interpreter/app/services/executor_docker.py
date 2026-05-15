@@ -20,6 +20,7 @@ from app.app_configs import (
     PYTHON_EXECUTOR_DOCKER_IMAGE,
     PYTHON_EXECUTOR_DOCKER_RUN_ARGS,
 )
+from app.image_ref import normalize_image_ref
 from app.services.executor_base import (
     SESSION_APP_LABEL,
     SESSION_COMPONENT_LABEL,
@@ -85,7 +86,7 @@ class DockerExecutor(BaseExecutor):
             )
 
         # Check executor image is available locally
-        image_with_tag = f"{self.image}:latest"
+        image_with_tag = normalize_image_ref(self.image)
         try:
             img_result = subprocess.run(
                 [self.docker_binary, "image", "inspect", image_with_tag],
