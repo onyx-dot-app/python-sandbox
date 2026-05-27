@@ -61,6 +61,8 @@ spec:
               value: {{ include "code-interpreter.kubernetesNamespace" . | quote }}
             - name: KUBERNETES_EXECUTOR_IMAGE
               value: {{ .Values.codeInterpreter.kubernetesExecutor.image | quote }}
+            - name: KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN
+              value: {{ .Values.codeInterpreter.kubernetesExecutor.netAdminLockdown | quote }}
             {{- if .Values.codeInterpreter.kubernetesExecutor.serviceAccount }}
             - name: KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
               value: {{ .Values.codeInterpreter.kubernetesExecutor.serviceAccount | quote }}
