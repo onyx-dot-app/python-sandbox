@@ -32,6 +32,7 @@ def executor() -> KubernetesExecutor:
     inst.namespace = "test"
     inst.image = "test:latest"
     inst.service_account = ""
+    inst.net_admin_lockdown = True
     pod_mock = MagicMock()
     pod_mock.status.phase = "Running"
     inst.v1.read_namespaced_pod.return_value = pod_mock
@@ -77,6 +78,32 @@ def test_create_session_sets_active_deadline(executor: KubernetesExecutor) -> No
     pod = executor.v1.create_namespaced_pod.call_args.kwargs["body"]
     assert pod.spec.active_deadline_seconds == 600
     assert pod.spec.containers[0].command == ["sleep", "600"]
+
+
+def test_create_session_adds_net_admin_lockdown_init_container(
+    executor: KubernetesExecutor,
+) -> None:
+    """With lockdown enabled, a NET_ADMIN init container drops outbound traffic."""
+    executor.create_session(ttl_seconds=600)
+
+    pod = executor.v1.create_namespaced_pod.call_args.kwargs["body"]
+    init_containers = pod.spec.init_containers
+    assert init_containers is not None
+    assert len(init_containers) == 1
+    lockdown = init_containers[0]
+    assert lockdown.name == "network-lockdown"
+    assert lockdown.security_context["capabilities"]["add"] == ["NET_ADMIN"]
+
+
+def test_create_session_omits_lockdown_when_disabled(
+    executor: KubernetesExecutor,
+) -> None:
+    """With lockdown disabled, no privileged init container is added (rely on NetworkPolicy)."""
+    executor.net_admin_lockdown = False
+    executor.create_session(ttl_seconds=600)
+
+    pod = executor.v1.create_namespaced_pod.call_args.kwargs["body"]
+    assert pod.spec.init_containers is None
 
 
 def test_create_session_stages_files(executor: KubernetesExecutor) -> None:

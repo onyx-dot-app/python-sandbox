@@ -25,6 +25,7 @@ from kubernetes.stream import ws_client  # type: ignore[import-untyped]
 from app.app_configs import (
     KUBERNETES_EXECUTOR_IMAGE,
     KUBERNETES_EXECUTOR_NAMESPACE,
+    KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN,
     KUBERNETES_EXECUTOR_SERVICE_ACCOUNT,
 )
 from app.services.executor_base import (
@@ -95,6 +96,7 @@ class KubernetesExecutor(BaseExecutor):
         self.namespace = KUBERNETES_EXECUTOR_NAMESPACE
         self.image = KUBERNETES_EXECUTOR_IMAGE
         self.service_account = KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
+        self.net_admin_lockdown = KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN
 
     def check_health(self) -> HealthCheck:
         """Verify Kubernetes API is reachable and we can create pods in the namespace."""
@@ -196,26 +198,34 @@ class KubernetesExecutor(BaseExecutor):
         # executor container as well. This eliminates the race condition
         # where the pod can send network requests before the Kubernetes
         # NetworkPolicy is enforced by the CNI.
-        iptables_script = "set -e && iptables -A OUTPUT -j DROP && ip6tables -A OUTPUT -j DROP"
-        network_lockdown_container = V1Container(
-            name="network-lockdown",
-            image=self.image,
-            command=["sh", "-c", iptables_script],
-            security_context={
-                "runAsUser": 0,
-                "runAsNonRoot": False,
-                "allowPrivilegeEscalation": False,
-                "readOnlyRootFilesystem": True,
-                "capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN"]},
-            },
-            resources={
-                "limits": {"cpu": "100m", "memory": "32Mi"},
-                "requests": {"cpu": "10m", "memory": "16Mi"},
-            },
-        )
+        #
+        # This requires the NET_ADMIN capability. Environments whose CNI
+        # enforces NetworkPolicies without that race (or that disallow
+        # NET_ADMIN) can disable this and rely on a NetworkPolicy instead.
+        init_containers: list[V1Container] = []
+        if self.net_admin_lockdown:
+            iptables_script = "set -e && iptables -A OUTPUT -j DROP && ip6tables -A OUTPUT -j DROP"
+            init_containers.append(
+                V1Container(
+                    name="network-lockdown",
+                    image=self.image,
+                    command=["sh", "-c", iptables_script],
+                    security_context={
+                        "runAsUser": 0,
+                        "runAsNonRoot": False,
+                        "allowPrivilegeEscalation": False,
+                        "readOnlyRootFilesystem": True,
+                        "capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN"]},
+                    },
+                    resources={
+                        "limits": {"cpu": "100m", "memory": "32Mi"},
+                        "requests": {"cpu": "10m", "memory": "16Mi"},
+                    },
+                )
+            )
 
         spec = V1PodSpec(
-            init_containers=[network_lockdown_container],
+            init_containers=init_containers or None,
             containers=[container],
             restart_policy="Never",
             active_deadline_seconds=active_deadline_seconds,
