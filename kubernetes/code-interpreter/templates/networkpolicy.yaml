@@ -21,16 +21,9 @@ spec:
   {{- end }}
 {{- end }}
 ---
-# NetworkPolicy for the ephemeral executor/session pods spawned by the
-# code-interpreter. These pods run user-submitted code and must be fully
-# network-isolated to prevent data exfiltration and SSRF attacks. It is always
-# applied (independent of networkPolicy.enabled, which only governs the
-# API-server pod policy above).
-#
-# Selects both the one-shot exec pods ("component: executor") and the
-# longer-lived session pods ("component: session"); both carry "app:
-# code-interpreter" and run untrusted code, so both are locked down. It is
-# pinned to the executor namespace, which may differ from the release namespace.
+# Deny-all-egress policy for the executor/session pods, which run untrusted user
+# code. Always applied (independent of networkPolicy.enabled, which only governs
+# the API-server policy above) and pinned to the executor namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -49,13 +42,5 @@ spec:
           - executor
           - session
   policyTypes:
-    - Ingress
     - Egress
-  ingress:
-    # Allow exec connections from the code-interpreter service pod
-    - from:
-        - podSelector:
-            matchLabels:
-              {{- include "code-interpreter.selectorLabels" . | nindent 14 }}
-  egress: []
-  # Deny all egress — executor pods must not have network access
+  egress: []  # No egress rules => all outbound traffic is denied.
