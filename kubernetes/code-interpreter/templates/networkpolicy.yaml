@@ -20,3 +20,27 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 {{- end }}
+---
+# Deny-all-egress policy for the executor/session pods, which run untrusted user
+# code. Always applied (independent of networkPolicy.enabled, which only governs
+# the API-server policy above) and pinned to the executor namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "code-interpreter.fullname" . }}-executor
+  namespace: {{ include "code-interpreter.kubernetesNamespace" . }}
+  labels:
+    {{- include "code-interpreter.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: code-interpreter
+    matchExpressions:
+      - key: component
+        operator: In
+        values:
+          - executor
+          - session
+  policyTypes:
+    - Egress
+  egress: []  # No egress rules => all outbound traffic is denied.

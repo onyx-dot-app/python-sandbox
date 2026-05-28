@@ -111,6 +111,17 @@ codeInterpreter:
     namespace: ""  # Empty means use the same namespace as the service
     image: ""  # Empty means used the default in code: `
     serviceAccount: ""  # Empty means use default service account for pods
+    # When true, executor pods run a privileged init container that uses the
+    # NET_ADMIN capability to apply iptables rules dropping all outbound traffic
+    # before the executor starts — an OS-level lockdown that avoids the race
+    # where a pod can reach the network before the CNI enforces a NetworkPolicy.
+    # Set to false in environments whose CNI applies NetworkPolicies without that
+    # race (or that disallow the NET_ADMIN capability).
+    #
+    # When this is false, the always-applied executor/session NetworkPolicy
+    # (templates/networkpolicy.yaml) becomes the sole network restriction on
+    # executor pods, so it must be enforced by the cluster CNI to have effect.
+    netAdminLockdown: true
     # Resource limits for execution pods
     podResources:
       limits:
@@ -162,7 +173,13 @@ readinessProbe:
   timeoutSeconds: 3
   failureThreshold: 3
 
-# Network Policy
+# Network Policy for the API-server (deployment) pod, configured by the fields
+# below. Off by default; its defaults (deny-all ingress, DNS-only egress) are a
+# starting point that most installs will need to customize before enabling.
+#
+# NOTE: this flag does NOT govern the executor/session pods. Those pods run user
+# code and are ALWAYS given a deny-all-egress NetworkPolicy
+# (templates/networkpolicy.yaml), independent of this setting.
 networkPolicy:
   enabled: false
   policyTypes:

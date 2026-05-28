@@ -20,6 +20,14 @@ KUBERNETES_EXECUTOR_IMAGE = (
     os.environ.get("KUBERNETES_EXECUTOR_IMAGE") or "onyxdotapp/python-executor-sci"
 )
 KUBERNETES_EXECUTOR_SERVICE_ACCOUNT = os.environ.get("KUBERNETES_EXECUTOR_SERVICE_ACCOUNT") or ""
+# When true, executor pods run a privileged (NET_ADMIN) init container that uses
+# iptables to drop all outbound traffic before the executor container starts. This
+# avoids the race where a pod can reach the network before the CNI enforces a
+# NetworkPolicy. Environments whose CNI applies NetworkPolicies without that race
+# (or that disallow NET_ADMIN) can set this to false and rely on a NetworkPolicy.
+KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN = (
+    os.environ.get("KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN") or "true"
+).lower() not in ("false", "0", "no")
 
 # Execution limits
 MAX_EXEC_TIMEOUT_MS = int(os.environ.get("MAX_EXEC_TIMEOUT_MS") or 60_000)

@@ -25,6 +25,7 @@ def executor() -> KubernetesExecutor:
     inst.namespace = "test"
     inst.image = "test:latest"
     inst.service_account = ""
+    inst.net_admin_lockdown = True
     return inst
 
 
