@@ -3,18 +3,25 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
 from collections.abc import Iterator
 from types import ModuleType
 
 import pytest
 
+_LOG_ENV_VARS = ("LOG_FORMAT", "LOG_LEVEL")
+
 
 @pytest.fixture(autouse=True)
 def _restore_logging() -> Iterator[None]:
-    """Snapshot and restore root/uvicorn logger state around each test.
+    """Snapshot and restore global state mutated by these tests.
 
-    setup_logging() mutates global logging state, so we save and restore it to
-    keep tests isolated from each other and from the rest of the suite.
+    Each test reloads app.app_configs / app.logging_config under custom env and
+    calls setup_logging(), which mutates both module-level globals and the
+    process-wide logging configuration. We restore the logging handlers, the
+    LOG_* env vars, and — critically — reload both modules back to their
+    baseline so leftover module attributes (e.g. JSON_LOGGING=True) cannot leak
+    into the rest of the pytest session, which shares this process.
     """
     root = logging.getLogger()
     saved_root_handlers = root.handlers[:]
@@ -23,6 +30,7 @@ def _restore_logging() -> Iterator[None]:
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         lg = logging.getLogger(name)
         saved[name] = (lg.handlers[:], lg.level, lg.propagate)
+    saved_env = {var: os.environ.get(var) for var in _LOG_ENV_VARS}
     try:
         yield
     finally:
@@ -33,6 +41,17 @@ def _restore_logging() -> Iterator[None]:
             lg.handlers = handlers
             lg.setLevel(level)
             lg.propagate = propagate
+        # Restore the env first, then reload so module globals reflect baseline.
+        for var, value in saved_env.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
+        import app.app_configs as app_configs
+        import app.logging_config as logging_config
+
+        importlib.reload(app_configs)
+        importlib.reload(logging_config)
 
 
 def _reload_logging_config(
@@ -108,6 +127,14 @@ def test_json_logging_strips_color_message(
 
     assert payload["message"] == "Started server"
     assert "color_message" not in payload
+
+
+def test_invalid_log_level_falls_back_to_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo'd LOG_LEVEL must not crash startup; it falls back to INFO."""
+    logging_config = _reload_logging_config(monkeypatch, "plain", level="INFOO")
+    logging_config.setup_logging()  # must not raise
+
+    assert logging.getLogger().level == logging.INFO
 
 
 def test_setup_logging_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
