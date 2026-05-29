@@ -102,6 +102,4 @@ def setup_logging() -> None:
         uvicorn_logger.propagate = True
 
     if not level_valid:
-        logging.getLogger(__name__).warning(
-            "Unknown LOG_LEVEL %r; falling back to INFO", LOG_LEVEL
-        )
+        logging.getLogger(__name__).warning("Unknown LOG_LEVEL %r; falling back to INFO", LOG_LEVEL)
