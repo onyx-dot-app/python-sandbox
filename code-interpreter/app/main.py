@@ -14,16 +14,14 @@ from fastapi import FastAPI
 from app.api.routes import router as api_router
 from app.app_configs import EXECUTOR_BACKEND, HOST, PORT, PYTHON_EXECUTOR_DOCKER_IMAGE
 from app.image_ref import normalize_image_ref
+from app.logging_config import setup_logging
 from app.models.schemas import HealthResponse
 from app.services.executor_factory import get_executor
 
 SESSION_REAPER_INTERVAL_SEC = 30
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -159,4 +157,6 @@ def run() -> None:
     """
     import uvicorn
 
-    uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="info")
+    # log_config=None keeps the logging configured by setup_logging(); otherwise
+    # uvicorn would install its own handlers/formatters and bypass our format.
+    uvicorn.run("app.main:app", host=HOST, port=PORT, log_config=None)

@@ -39,6 +39,14 @@ MEMORY_LIMIT_MB = int(os.environ.get("MEMORY_LIMIT_MB") or 256)
 HOST = os.environ.get("HOST") or "0.0.0.0"  # noqa: S104
 PORT = int(os.environ.get("PORT") or "8000")
 
+# Logging configuration
+# LOG_LEVEL controls verbosity (e.g. DEBUG, INFO, WARNING).
+# LOG_FORMAT selects the output style: "plain" (default human-readable text) or
+# "json" (structured single-line JSON suitable for container log aggregators).
+LOG_LEVEL = (os.environ.get("LOG_LEVEL") or "INFO").upper()
+LOG_FORMAT = (os.environ.get("LOG_FORMAT") or "plain").lower()
+JSON_LOGGING = LOG_FORMAT == "json"
+
 # File storage configuration
 FILE_STORAGE_DIR = (
     os.environ.get("FILE_STORAGE_DIR") or "/tmp/code-interpreter-files"  # noqa: S108
