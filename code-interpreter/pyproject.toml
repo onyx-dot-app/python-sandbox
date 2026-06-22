@@ -13,7 +13,7 @@ authors = [{ name = "Your Team" }]
 dependencies = [
   "fastapi==0.115.0",
   "httpx>=0.28.1",
-  "python-multipart>=0.0.20",
+  "python-multipart>=0.0.31",
   "uvicorn==0.30.6",
   "kubernetes>=31.0.0",
   "python-json-logger>=3.1.0",
