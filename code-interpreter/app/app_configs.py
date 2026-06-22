@@ -13,6 +13,10 @@ PYTHON_EXECUTOR_DOCKER_IMAGE = (
     os.environ.get("PYTHON_EXECUTOR_DOCKER_IMAGE") or "onyxdotapp/python-executor-sci"
 )
 PYTHON_EXECUTOR_DOCKER_RUN_ARGS = os.environ.get("PYTHON_EXECUTOR_DOCKER_RUN_ARGS") or ""
+# Docker network for spawned executor containers. Defaults to "none" (no network access)
+# for maximum isolation. Set to a Docker network name (e.g. "onyx_default", "traefik")
+# to allow executor containers to reach services on that network.
+PYTHON_EXECUTOR_DOCKER_NETWORK = os.environ.get("PYTHON_EXECUTOR_DOCKER_NETWORK") or "none"
 
 # Kubernetes executor configuration
 KUBERNETES_EXECUTOR_NAMESPACE = os.environ.get("KUBERNETES_EXECUTOR_NAMESPACE") or "default"

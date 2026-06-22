@@ -18,6 +18,7 @@ from typing import Literal
 from app.app_configs import (
     PYTHON_EXECUTOR_DOCKER_BIN,
     PYTHON_EXECUTOR_DOCKER_IMAGE,
+    PYTHON_EXECUTOR_DOCKER_NETWORK,
     PYTHON_EXECUTOR_DOCKER_RUN_ARGS,
 )
 from app.image_ref import normalize_image_ref
@@ -269,7 +270,7 @@ class DockerExecutor(BaseExecutor):
             "--pull",
             "never",
             "--network",
-            "none",
+            PYTHON_EXECUTOR_DOCKER_NETWORK,
             "--name",
             container_name,
             "--cgroupns",
