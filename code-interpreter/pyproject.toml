@@ -11,7 +11,7 @@ requires-python = ">=3.11,<3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "Your Team" }]
 dependencies = [
-  "fastapi==0.115.0",
+  "fastapi==0.138.0",
   "httpx>=0.28.1",
   "python-multipart>=0.0.31",
   "uvicorn==0.30.6",

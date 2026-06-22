@@ -52,7 +52,7 @@ def _validate_timeout(req: ExecuteRequest) -> None:
     settings = get_settings()
     if req.timeout_ms > settings.max_exec_timeout_ms:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"timeout_ms exceeds maximum of {settings.max_exec_timeout_ms} ms",
         )
 
@@ -130,7 +130,7 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
         )
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
@@ -202,7 +202,7 @@ async def upload_file(file: UploadFile = File(...)) -> UploadFileResponse:  # no
     max_size_bytes = settings.max_file_size_mb * 1024 * 1024
     if len(content) > max_size_bytes:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"File size exceeds maximum of {settings.max_file_size_mb} MB",
         )
 
@@ -301,7 +301,7 @@ def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
         ) from exc
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
@@ -345,7 +345,7 @@ def session_exec_bash(session_id: str, req: BashExecRequest) -> BashExecResponse
     settings = get_settings()
     if req.timeout_ms > settings.max_exec_timeout_ms:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"timeout_ms exceeds maximum of {settings.max_exec_timeout_ms} ms",
         )
 
