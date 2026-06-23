@@ -27,6 +27,10 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Read version from pyproject
+        id: version
+        run: echo "version=$(grep -m1 '^version = ' executor/pyproject.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -34,6 +38,7 @@ jobs:
           images: ${{ env.DOCKERHUB_USERNAME }}/python-executor-sci
           tags: |
             type=semver,pattern={{version}}
+            type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest
 
       - name: Build and push executor image
@@ -66,6 +71,10 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Read version from pyproject
+        id: version
+        run: echo "version=$(grep -m1 '^version = ' code-interpreter/pyproject.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -73,6 +82,7 @@ jobs:
           images: ${{ env.DOCKERHUB_USERNAME }}/code-interpreter
           tags: |
             type=semver,pattern={{version}}
+            type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest
 
       - name: Build and push code-interpreter image
