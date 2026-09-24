@@ -80,7 +80,7 @@ spec:
               value: {{ .readOnlyRootFilesystem | quote }}
             {{- end }}
             - name: KUBERNETES_EXECUTOR_POD_RESOURCES
-              value: {{ .Values.codeInterpreter.kubernetesExecutor.podResources | toJson | quote }}
+              value: {{ include "code-interpreter.executorPodResources" . | quote }}
             - name: KUBERNETES_EXECUTOR_WORKSPACE_SIZE_LIMIT
               value: {{ .Values.codeInterpreter.kubernetesExecutor.workspaceSizeLimit | quote }}
             - name: KUBERNETES_EXECUTOR_TMP_SIZE_LIMIT

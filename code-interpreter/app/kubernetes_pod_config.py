@@ -24,7 +24,7 @@ CONTROLLER_LABEL_KEYS: Final[frozenset[str]] = frozenset({"app", "component"})
 CONTROLLER_ANNOTATION_KEYS: Final[frozenset[str]] = frozenset({SESSION_EXPIRES_AT_KEY})
 
 DEFAULT_RESOURCE_REQUESTS: Final[dict[str, str]] = {"cpu": "100m", "memory": "64Mi"}
-DEFAULT_RESOURCE_LIMITS: Final[dict[str, str]] = {"cpu": "1"}
+DEFAULT_RESOURCE_LIMITS: Final[dict[str, str]] = {"cpu": "5"}
 DEFAULT_WORKSPACE_SIZE_LIMIT: Final[str] = "100Mi"
 DEFAULT_TMP_SIZE_LIMIT: Final[str] = "64Mi"
 

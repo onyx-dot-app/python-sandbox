@@ -128,7 +128,7 @@ KUBERNETES_EXECUTOR_POD_OVERRIDES: Final[ExecutorPodOverrides] = parse_pod_overr
     "KUBERNETES_EXECUTOR_POD_OVERRIDES", os.environ.get("KUBERNETES_EXECUTOR_POD_OVERRIDES")
 )
 # JSON {"requests": {...}, "limits": {...}} for cpu, memory (requests only) and
-# ephemeral-storage. Unset means requests cpu=100m, memory=64Mi and limits cpu=1.
+# ephemeral-storage. Unset means requests cpu=100m, memory=64Mi and limits cpu=5.
 KUBERNETES_EXECUTOR_POD_RESOURCES: Final[ExecutorPodResources] = parse_pod_resources(
     "KUBERNETES_EXECUTOR_POD_RESOURCES", os.environ.get("KUBERNETES_EXECUTOR_POD_RESOURCES")
 )

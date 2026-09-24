@@ -160,9 +160,11 @@ codeInterpreter:
     # codeInterpreter.memoryLimitMb, and a larger memory request is capped at it.
     # codeInterpreter.cpuTimeLimitSec does not affect execution pods. Set a value
     # to null to remove a default, e.g. limits.cpu: null for no CPU limit.
+    # The CPU limit default of 5 keeps the limit that earlier versions derived
+    # from cpuTimeLimitSec. Lower it (e.g. to "1") to pack pods densely.
     podResources:
       limits:
-        cpu: "1"
+        cpu: "5"
       requests:
         cpu: "100m"
         memory: "64Mi"

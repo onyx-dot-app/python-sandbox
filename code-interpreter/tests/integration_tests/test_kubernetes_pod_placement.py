@@ -211,7 +211,7 @@ def test_default_resources(executor: KubernetesExecutor) -> None:
     resources = _manifest(executor).spec.containers[0].resources
     assert resources == {
         "requests": {"cpu": "100m", "memory": "64Mi"},
-        "limits": {"cpu": "1", "memory": "256Mi"},
+        "limits": {"cpu": "5", "memory": "256Mi"},
     }
 
 
@@ -249,12 +249,12 @@ def test_cpu_limit_does_not_come_from_cpu_time_limit(executor: KubernetesExecuto
         stdin=None,
         timeout_ms=1_000,
         max_output_bytes=100,
-        cpu_time_limit_sec=5,
+        cpu_time_limit_sec=2,
         memory_limit_mb=256,
     )
 
     pod = executor.v1.create_namespaced_pod.call_args.kwargs["body"]
-    assert pod.spec.containers[0].resources["limits"]["cpu"] == "1"
+    assert pod.spec.containers[0].resources["limits"]["cpu"] == "5"
 
 
 def test_memory_request_is_capped_at_memory_limit(executor: KubernetesExecutor) -> None:

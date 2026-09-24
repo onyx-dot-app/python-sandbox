@@ -76,7 +76,7 @@ helm install code-interpreter ./code-interpreter -f my-values.yaml
 | `codeInterpreter.kubernetesExecutor.securityContext.mode` | `fixed` uses the IDs below; `platform` lets the platform assign them | `fixed` |
 | `codeInterpreter.kubernetesExecutor.securityContext.runAsUser` / `runAsGroup` / `fsGroup` | Execution pod IDs in `fixed` mode; `null` omits one | `65532` |
 | `codeInterpreter.kubernetesExecutor.securityContext.readOnlyRootFilesystem` | Mount the execution container root filesystem read-only | `true` |
-| `codeInterpreter.kubernetesExecutor.podResources` | Execution container `requests` (cpu, memory, ephemeral-storage) and `limits` (cpu, ephemeral-storage); the memory limit is `memoryLimitMb` | requests `cpu: 100m`, `memory: 64Mi`; limits `cpu: "1"` |
+| `codeInterpreter.kubernetesExecutor.podResources` | Execution container `requests` (cpu, memory, ephemeral-storage) and `limits` (cpu, ephemeral-storage); the memory limit is `memoryLimitMb` | requests `cpu: 100m`, `memory: 64Mi`; limits `cpu: "5"` |
 | `codeInterpreter.kubernetesExecutor.workspaceSizeLimit` | Size limit of the `/workspace` emptyDir | `100Mi` |
 | `codeInterpreter.kubernetesExecutor.tmpSizeLimit` | Size limit of the `/tmp` emptyDir | `64Mi` |
 | `codeInterpreter.kubernetesExecutor.pod.nodeSelector` | Node selector of execution pods | `{}` |
@@ -213,8 +213,11 @@ codeInterpreter:
     tmpSizeLimit: 128Mi
 ```
 
-`podResources.limits.memory` is not supported: the chart fails to render if you set
-it. `codeInterpreter.cpuTimeLimitSec` does not apply to execution pods; the
+The CPU limit default of `"5"` keeps the limit that earlier versions derived from
+`cpuTimeLimitSec`. Lower it (for example to `"1"`) to pack pods densely.
+
+`podResources.limits.memory` is not supported. The chart ignores it and prints a
+warning in the release notes; set `memoryLimitMb` instead. `codeInterpreter.cpuTimeLimitSec` does not apply to execution pods; the
 execution timeout bounds their run time. With the read-only root filesystem, the
 emptyDir size limits bound what user code can write. Kubelet evicts a pod that goes
 over a limit, so the write itself does not fail at once.

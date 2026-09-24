@@ -273,7 +273,7 @@ securityContext:
 resources:
   limits:
     memory: "256Mi"     # MEMORY_LIMIT_MB
-    cpu: "1"            # KUBERNETES_EXECUTOR_POD_RESOURCES
+    cpu: "5"            # KUBERNETES_EXECUTOR_POD_RESOURCES
   requests:
     memory: "64Mi"      # KUBERNETES_EXECUTOR_POD_RESOURCES, capped at the memory limit
     cpu: "100m"         # KUBERNETES_EXECUTOR_POD_RESOURCES
@@ -281,6 +281,8 @@ resources:
 
 - `KUBERNETES_EXECUTOR_POD_RESOURCES` is JSON with `requests` (cpu, memory,
   ephemeral-storage) and `limits` (cpu, ephemeral-storage). Unset gives the values above.
+- The CPU limit default of 5 keeps the limit that earlier versions derived from
+  `CPU_TIME_LIMIT_SEC`. Lower it (for example to `1`) to pack pods densely.
 - The memory limit always comes from `MEMORY_LIMIT_MB`, the same setting that the Docker
   backend uses. The configuration cannot set it, so one setting controls it.
 - `CPU_TIME_LIMIT_SEC` does not apply to executor pods. The execution timeout
@@ -486,7 +488,7 @@ resources:
 ```yaml
 resources:
   limits:
-    cpu: "1"  # KUBERNETES_EXECUTOR_POD_RESOURCES
+    cpu: "5"  # KUBERNETES_EXECUTOR_POD_RESOURCES
 ```
 
 - Throttling applied via CFS (Completely Fair Scheduler)
