@@ -1,0 +1,40 @@
+{{- if .Values.executorResourceQuota.enabled }}
+{{- if and (eq (include "code-interpreter.kubernetesNamespace" .) .Release.Namespace) (not .Values.executorResourceQuota.allowReleaseNamespace) }}
+{{- fail "executorResourceQuota applies to every pod in its namespace. Set codeInterpreter.kubernetesExecutor.namespace to a dedicated namespace, or set executorResourceQuota.allowReleaseNamespace=true if this release owns its namespace." }}
+{{- end }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "code-interpreter.fullname" . }}-executor
+  namespace: {{ include "code-interpreter.kubernetesNamespace" . }}
+  labels:
+    {{- include "code-interpreter.labels" . | nindent 4 }}
+spec:
+  hard:
+    {{- toYaml .Values.executorResourceQuota.hard | nindent 4 }}
+  {{- with .Values.executorResourceQuota.scopes }}
+  scopes:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- if .Values.executorResourceQuota.limitRange.enabled }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ include "code-interpreter.fullname" . }}-executor
+  namespace: {{ include "code-interpreter.kubernetesNamespace" . }}
+  labels:
+    {{- include "code-interpreter.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      {{- with .Values.executorResourceQuota.limitRange.defaultRequest }}
+      defaultRequest:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.executorResourceQuota.limitRange.default }}
+      default:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

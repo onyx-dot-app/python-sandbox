@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import math
 import tarfile
@@ -59,14 +60,17 @@ from app.services.executor_base import (
     SESSION_EXPIRES_AT_KEY,
     SESSION_NAME_PREFIX,
     BaseExecutor,
+    CapacityReason,
     EntryKind,
     ExecutionResult,
+    ExecutorCapacityError,
     HealthCheck,
     SessionInfo,
     SessionNotFoundError,
     StreamChunk,
     StreamEvent,
     StreamResult,
+    StreamStarted,
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
@@ -265,6 +269,67 @@ def _parse_exit_code(error: str) -> int | None:
         logger.warning(f"Error occurred when parsing exit code: {e}")
         return None
     return None
+
+
+def _api_exception_message(e: ApiException) -> str:
+    body = e.body.decode("utf-8", errors="replace") if isinstance(e.body, bytes) else e.body
+    if isinstance(body, str):
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            return body
+        if isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
+            return str(parsed["message"])
+        return body
+    return str(e.reason or "")
+
+
+def capacity_error_from_api_exception(e: ApiException) -> ExecutorCapacityError | None:
+    """Map a pod-create rejection caused by an exhausted ResourceQuota.
+
+    Other 403s (missing RBAC, "must specify limits" on a quota'd namespace) are
+    configuration errors, not transient capacity, and are left alone.
+    """
+    if e.status != 403:
+        return None
+    message = _api_exception_message(e)
+    if "exceeded quota" not in message:
+        return None
+    return ExecutorCapacityError(message, reason=CapacityReason.QUOTA_EXCEEDED)
+
+
+def pod_unschedulable_error(pod: V1Pod) -> ExecutorCapacityError | None:
+    """Return a capacity error if the scheduler has marked ``pod`` Unschedulable.
+
+    Intended for the pod-ready wait loop: raise the result instead of waiting
+    out the full timeout, so the API can answer 503 with the scheduler's reason.
+    """
+    status = pod.status
+    if status is None or status.phase != "Pending":
+        return None
+    for condition in status.conditions or []:
+        if (
+            condition.type == "PodScheduled"
+            and condition.status == "False"
+            and condition.reason == "Unschedulable"
+        ):
+            return ExecutorCapacityError(
+                f"Executor pod cannot be scheduled: {condition.message or 'no reason given'}",
+                reason=CapacityReason.UNSCHEDULABLE,
+            )
+    return None
+
+
+@contextmanager
+def _map_capacity_errors() -> Generator[None, None, None]:
+    try:
+        yield
+    except ApiException as e:
+        capacity_error = capacity_error_from_api_exception(e)
+        if capacity_error is None:
+            raise
+        logger.warning("Executor capacity unavailable: %s", capacity_error)
+        raise capacity_error from e
 
 
 @dataclass
@@ -1016,7 +1081,8 @@ class KubernetesExecutor(BaseExecutor):
             self.namespace,
             ttl_seconds,
         )
-        self.v1.create_namespaced_pod(namespace=self.namespace, body=manifest)
+        with _map_capacity_errors():
+            self.v1.create_namespaced_pod(namespace=self.namespace, body=manifest)
 
         try:
             self._wait_for_pod_ready(pod_name)
@@ -1157,13 +1223,16 @@ class KubernetesExecutor(BaseExecutor):
             last_line_interactive: If True, the last line will print its value to stdout
                                    if it's a bare expression (only the last line is affected).
         """
-        with self._run_in_pod(
-            code=code,
-            timeout_ms=timeout_ms,
-            memory_limit_mb=memory_limit_mb,
-            files=files,
-            last_line_interactive=last_line_interactive,
-        ) as ctx:
+        with (
+            _map_capacity_errors(),
+            self._run_in_pod(
+                code=code,
+                timeout_ms=timeout_ms,
+                memory_limit_mb=memory_limit_mb,
+                files=files,
+                last_line_interactive=last_line_interactive,
+            ) as ctx,
+        ):
             if stdin:
                 logger.debug("Writing stdin to Python process")
                 ctx.exec_resp.write_stdin(stdin)
@@ -1216,13 +1285,17 @@ class KubernetesExecutor(BaseExecutor):
         Yields StreamChunk events during execution, then a single StreamResult
         at the end containing exit_code, timing, and workspace files.
         """
-        with self._run_in_pod(
-            code=code,
-            timeout_ms=timeout_ms,
-            memory_limit_mb=memory_limit_mb,
-            files=files,
-            last_line_interactive=last_line_interactive,
-        ) as ctx:
+        with (
+            _map_capacity_errors(),
+            self._run_in_pod(
+                code=code,
+                timeout_ms=timeout_ms,
+                memory_limit_mb=memory_limit_mb,
+                files=files,
+                last_line_interactive=last_line_interactive,
+            ) as ctx,
+        ):
+            yield StreamStarted()
             if stdin:
                 logger.debug("Writing stdin to Python process")
                 ctx.exec_resp.write_stdin(stdin)

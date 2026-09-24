@@ -9,20 +9,30 @@ from importlib.metadata import version as _package_version
 from shutil import which
 from typing import Final
 
-from fastapi import FastAPI
+import anyio.to_thread
+from fastapi import FastAPI, Response, status
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.api.routes import router as api_router
 from app.app_configs import (
+    BACKEND_CHECK_TIMEOUT_SEC,
+    EXECUTION_QUEUE_TIMEOUT_SEC,
     EXECUTOR_BACKEND,
+    HEALTH_CHECK_INTERVAL_SEC,
     HOST,
+    KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN,
+    MAX_CONCURRENT_EXECUTIONS,
     PORT,
     PYTHON_EXECUTOR_DOCKER_BIN,
     PYTHON_EXECUTOR_DOCKER_IMAGE,
     PYTHON_EXECUTOR_DOCKER_IMAGE_WATCHDOG_INTERVAL_SEC,
+    PYTHON_EXECUTOR_DOCKER_NETWORK,
 )
 from app.image_ref import normalize_image_ref
 from app.logging_config import setup_logging
 from app.models.schemas import HealthResponse
+from app.services.admission import ExecutionLimiter
+from app.services.executor_base import HealthCheck
 from app.services.executor_factory import get_executor
 
 SESSION_REAPER_INTERVAL_SEC = 30
@@ -33,6 +43,45 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 SERVICE_VERSION: Final[str] = _package_version("code-interpreter")
+
+# Threads left for non-execution work (file routes, stream reads) on top of
+# one thread per admitted execution.
+_THREADPOOL_HEADROOM: Final[int] = 24
+
+
+def network_isolation_mode() -> str:
+    """Describe how executor sandboxes are cut off from the network."""
+    if EXECUTOR_BACKEND.lower() == "kubernetes":
+        if KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN:
+            return "net_admin_init_container+network_policy"
+        return "network_policy_only"
+    return f"docker_network:{PYTHON_EXECUTOR_DOCKER_NETWORK}"
+
+
+async def _check_backend() -> HealthCheck:
+    """Run the executor health check off the request threadpool, with a timeout."""
+    try:
+        with anyio.fail_after(BACKEND_CHECK_TIMEOUT_SEC):
+            return await asyncio.to_thread(lambda: get_executor().check_health())
+    except TimeoutError:
+        return HealthCheck(
+            status="error",
+            message=f"Executor backend check timed out after {BACKEND_CHECK_TIMEOUT_SEC}s",
+        )
+    except Exception as e:
+        return HealthCheck(status="error", message=f"Executor backend check failed: {e}")
+
+
+async def _refresh_backend_health(app: FastAPI) -> HealthCheck:
+    result = await _check_backend()
+    app.state.backend_health = result
+    return result
+
+
+async def _backend_health_loop(app: FastAPI) -> None:
+    while True:
+        await asyncio.sleep(HEALTH_CHECK_INTERVAL_SEC)
+        await _refresh_backend_health(app)
 
 
 def _docker_image_present(docker_bin: str, image_with_tag: str) -> bool:
@@ -170,9 +219,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _ensure_docker_image_available()
         logger.info("Docker executor image is ready")
 
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    limiter.total_tokens = max(
+        limiter.total_tokens, app.state.execution_limiter.limit + _THREADPOOL_HEADROOM
+    )
+
+    await _refresh_backend_health(app)
+
     # Reap any sessions whose TTL elapsed while the service was down.
     await _reap_expired_sessions_once()
-    background_tasks: list[asyncio.Task[None]] = [asyncio.create_task(_session_reaper_loop())]
+    background_tasks: list[asyncio.Task[None]] = [
+        asyncio.create_task(_session_reaper_loop()),
+        asyncio.create_task(_backend_health_loop(app)),
+    ]
 
     # Keep the executor image present for the lifetime of the service; see
     # _image_watchdog_loop. Interval 0 disables it (e.g. air-gapped hosts).
@@ -207,15 +266,41 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    @app.get("/health")
-    def health() -> HealthResponse:
-        """Health check that verifies the executor backend is operational."""
-        result = get_executor().check_health()
+    app.state.execution_limiter = ExecutionLimiter(
+        limit=MAX_CONCURRENT_EXECUTIONS,
+        queue_timeout_sec=EXECUTION_QUEUE_TIMEOUT_SEC,
+    )
+    app.state.backend_health = None
+
+    def _health_response(result: HealthCheck | None) -> HealthResponse:
         return HealthResponse(
-            status=result.status,
-            message=result.message,
+            status=result.status if result else "ok",
+            message=result.message if result else None,
             version=SERVICE_VERSION,
+            executor_backend=EXECUTOR_BACKEND.lower(),
+            network_isolation=network_isolation_mode(),
         )
+
+    @app.get("/health")
+    async def health() -> HealthResponse:
+        """Liveness: answers from memory, never calls the executor backend.
+
+        ``status`` reflects the last background backend check, so it can lag
+        by up to HEALTH_CHECK_INTERVAL_SEC. The HTTP status is always 200.
+        """
+        return _health_response(app.state.backend_health)
+
+    @app.get("/ready", responses={503: {"model": HealthResponse}})
+    async def ready(response: Response) -> HealthResponse:
+        """Readiness: runs a fresh backend check; 503 if the backend is unusable."""
+        result = await _refresh_backend_health(app)
+        if result.status != "ok":
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return _health_response(result)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(api_router, prefix="/v1")
     return app

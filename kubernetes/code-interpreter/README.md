@@ -30,7 +30,7 @@ helm install code-interpreter ./kubernetes/code-interpreter
 ```bash
 # Create a custom values file
 cat > my-values.yaml <<EOF
-replicaCount: 3
+replicaCount: 1
 
 image:
   repository: my-registry.com/code-interpreter
@@ -89,6 +89,13 @@ helm install code-interpreter ./code-interpreter -f my-values.yaml
 | `service.type` | Kubernetes service type | `ClusterIP` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `rbac.create` | Create RBAC resources | `true` |
+| `capacity.maxConcurrentExecutions` | In-flight executions per replica before 429 | `16` |
+| `capacity.queueTimeoutSec` | Wait for a free slot before 429 | `5` |
+| `capacity.retryAfterSec` | `Retry-After` sent with 429 | `2` |
+| `capacity.capacityRetryAfterSec` | `Retry-After` sent with 503 | `10` |
+| `executorResourceQuota.enabled` | Create a ResourceQuota in the executor namespace | `false` |
+| `metrics.serviceMonitor.enabled` | Create a Prometheus Operator ServiceMonitor | `false` |
+| `fileStorage.shared` | Confirm that all replicas share `FILE_STORAGE_DIR` (needed for `replicaCount > 1`) | `false` |
 
 See [values.yaml](values.yaml) for the full list of configurable parameters.
 
@@ -107,7 +114,6 @@ helm install code-interpreter ./code-interpreter \
 
 ```bash
 helm install code-interpreter ./code-interpreter \
-  --set replicaCount=3 \
   --set ingress.enabled=true \
   --set ingress.className=nginx \
   --set "ingress.hosts[0].host=api.example.com" \
@@ -289,25 +295,105 @@ resources:
 
 ## Health Checks
 
-The chart configures liveness and readiness probes:
+| Endpoint | Probe | Behavior |
+|----------|-------|----------|
+| `/health` | liveness | Answers from memory. It never calls the Kubernetes API, so a slow API server or a saturated replica does not get the pod restarted during runs. Always HTTP 200. `status` shows the last background backend check. |
+| `/ready` | readiness | Runs a fresh backend check (can the service account create executor pods). HTTP 503 when the check fails or takes longer than `BACKEND_CHECK_TIMEOUT_SEC`. |
+
+Both payloads include `executor_backend` and `network_isolation`. For the Kubernetes
+backend, `network_isolation` is `net_admin_init_container+network_policy` when
+`kubernetesExecutor.netAdminLockdown=true`, and `network_policy_only` when it is false.
+In the second case, the executor NetworkPolicy is the only network control, so your CNI
+must enforce it.
+
+Readiness does not fail when the replica is busy. Busy replicas answer 429 (see below).
+
+## Capacity and Overload
+
+Each replica admits at most `capacity.maxConcurrentExecutions` executions at a time.
+This covers `/v1/execute`, `/v1/execute/stream`, session creation, and session bash
+commands. A request waits up to `capacity.queueTimeoutSec` for a free slot.
+
+| Status | Meaning | Client action |
+|--------|---------|---------------|
+| `429` + `Retry-After` | This replica has no free slot. | Retry after the delay. Another replica can take the retry. |
+| `503` + `Retry-After` | The cluster has no room for an executor pod: the executor namespace ResourceQuota is exhausted, or the pod is unschedulable. | Retry after the delay, or add cluster capacity. |
+
+`/v1/execute/stream` returns these statuses before the event stream opens, so clients
+see a real HTTP status, not an SSE `error` event. The body uses the usual
+`{"detail": "..."}` shape.
+
+The default of 16 slots per replica keeps each replica below the server's default
+thread pool (40) with headroom for file routes and stream reads. At the default
+executor size (256Mi memory limit, 100m CPU request), 16 runs need about 4Gi of memory
+limits and 1.6 CPU of requests. Raise the value only when the cluster can schedule that
+many executor pods per replica.
+
+### Executor ResourceQuota
+
+Set `executorResourceQuota.enabled=true` to cap what executor pods can use. The quota
+applies to every pod in its namespace, so use a dedicated executor namespace:
 
 ```yaml
-livenessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 10
-  periodSeconds: 10
-
-readinessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 5
-  periodSeconds: 5
+codeInterpreter:
+  kubernetesExecutor:
+    namespace: code-execution   # must exist
+executorResourceQuota:
+  enabled: true
+  hard:
+    pods: "32"
+    requests.cpu: "4"
+    requests.memory: 4Gi
+    limits.memory: 12Gi
 ```
 
+Count session pods in `pods`: each open session holds one pod for its whole TTL.
+Executor pods set no ephemeral-storage requests. If you add ephemeral-storage keys to
+`hard`, also set `executorResourceQuota.limitRange.enabled=true` to give containers a
+default. Rendering fails if the quota would go into the release namespace, unless you
+set `executorResourceQuota.allowReleaseNamespace=true`.
+
+### Metrics
+
+The service serves Prometheus metrics at `/metrics` on the `http` port. Set
+`metrics.serviceMonitor.enabled=true` to create a ServiceMonitor (this needs the
+Prometheus Operator CRDs).
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `code_interpreter_executions_active` | gauge | `operation` |
+| `code_interpreter_executions_limit` | gauge | |
+| `code_interpreter_executions_rejected_total` | counter | `operation`, `status` (429/503), `reason` (`concurrency_limit`, `quota_exceeded`, `unschedulable`) |
+| `code_interpreter_executions_completed_total` | counter | `operation`, `outcome` (`ok`, `timed_out`, `error`) |
+| `code_interpreter_admission_wait_seconds` | histogram | `operation` |
+| `code_interpreter_execution_duration_seconds` | histogram | `operation` |
+
+## File Storage and Replicas
+
+Uploaded files and execution outputs are stored on the local disk of the replica that
+received them (`FILE_STORAGE_DIR`, default `/tmp/code-interpreter-files`). The Onyx
+client uploads a file and then runs code in a separate request. With more than one
+replica and no sticky routing, the run can land on a replica that does not have the
+file, and the run fails with 404.
+
+For this reason, the chart fails to render when `replicaCount > 1` unless you set
+`fileStorage.shared=true`. Set it only after you do one of these:
+
+- Mount shared storage (a ReadWriteMany volume) at `FILE_STORAGE_DIR` on every replica,
+  with `volumes`, `volumeMounts` and, if needed, a `FILE_STORAGE_DIR` entry in
+  `extraEnvVars`.
+- Route each client to one replica (sticky sessions on your ingress or service mesh).
+
 ## Upgrading
+
+### Notes for this release
+
+- The readiness probe now uses `/ready`. If you override `readinessProbe`, point it at
+  `/ready`.
+- Rendering fails for `replicaCount > 1` unless `fileStorage.shared=true`. See
+  [File Storage and Replicas](#file-storage-and-replicas).
+- Executions over `capacity.maxConcurrentExecutions` per replica get 429 with
+  `Retry-After`.
 
 ### Upgrade the deployment
 

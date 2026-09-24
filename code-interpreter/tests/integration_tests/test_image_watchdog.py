@@ -120,7 +120,7 @@ def test_watchdog_pass_returns_when_pull_fails() -> None:
         assert IMAGE not in host.images
 
         # The service keeps serving and keeps naming the condition precisely.
-        body = TestClient(create_app()).get("/health").json()
+        body = TestClient(create_app()).get("/ready").json()
 
     assert body["status"] == "error"
     assert f"Executor image {IMAGE} not available locally" == body["message"]
@@ -141,23 +141,23 @@ def test_watchdog_pass_returns_when_docker_times_out(timing_out: str) -> None:
 
 
 def test_health_recovers_after_watchdog_repull() -> None:
-    """The exact reported scenario: a host prune breaks /health, the watchdog restores it."""
+    """The exact reported scenario: a host prune breaks readiness, the watchdog restores it."""
     host = FakeDockerHost(images={IMAGE})
 
     with _fake_docker(host):
         client = TestClient(create_app())
-        assert client.get("/health").json()["status"] == "ok"
+        assert client.get("/ready").json()["status"] == "ok"
 
         # The host removes the dormant image while the service is running.
         host.images.clear()
-        body = client.get("/health").json()
+        body = client.get("/ready").json()
         assert body["status"] == "error"
         assert "not available locally" in body["message"]
 
         asyncio.run(_image_watchdog_once())
 
         assert host.pulls == [IMAGE]
-        body = client.get("/health").json()
+        body = client.get("/ready").json()
 
     assert body["status"] == "ok"
     assert body["message"] is None

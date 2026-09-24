@@ -97,6 +97,9 @@ Reject value combinations that cannot work.
 {{- if and (eq $mode "platform") $executor.netAdminLockdown -}}
 {{- fail "codeInterpreter.kubernetesExecutor.securityContext.mode=platform requires codeInterpreter.kubernetesExecutor.netAdminLockdown=false: the lockdown init container runs as root with NET_ADMIN, which restricted admission (Pod Security \"restricted\", OpenShift restricted-v2) rejects. Enforce egress with the executor NetworkPolicy instead." -}}
 {{- end -}}
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.fileStorage.shared) -}}
+{{- fail "replicaCount > 1 needs shared file storage: uploaded files live on the local disk of one replica. Mount shared storage at FILE_STORAGE_DIR (or use sticky sessions) and set fileStorage.shared=true. See the chart README." -}}
+{{- end -}}
 {{- end }}
 
 {{/*

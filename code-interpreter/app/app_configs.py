@@ -170,6 +170,22 @@ FILE_STORAGE_DIR = (
 MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB") or 100)
 FILE_TTL_SEC = int(os.environ.get("FILE_TTL_SEC") or 3600)
 
+# Admission control and overload contract (see HOW_IT_WORKS.md, "Capacity").
+# MAX_CONCURRENT_EXECUTIONS caps in-flight executions (execute, execute/stream,
+# session create, session bash) per replica. A request that cannot get a slot
+# within EXECUTION_QUEUE_TIMEOUT_SEC gets 429 with Retry-After:
+# EXECUTION_RETRY_AFTER_SEC. When the executor backend itself has no room
+# (namespace ResourceQuota exhausted, pod unschedulable) the response is 503
+# with Retry-After: CAPACITY_RETRY_AFTER_SEC.
+MAX_CONCURRENT_EXECUTIONS = max(1, int(os.environ.get("MAX_CONCURRENT_EXECUTIONS") or 16))
+EXECUTION_QUEUE_TIMEOUT_SEC = max(0.0, float(os.environ.get("EXECUTION_QUEUE_TIMEOUT_SEC") or 5.0))
+EXECUTION_RETRY_AFTER_SEC = max(1, int(os.environ.get("EXECUTION_RETRY_AFTER_SEC") or 2))
+CAPACITY_RETRY_AFTER_SEC = max(1, int(os.environ.get("CAPACITY_RETRY_AFTER_SEC") or 10))
+# /health serves a cached backend check refreshed on this interval, so the
+# liveness probe never waits on the Docker daemon or the Kubernetes API.
+HEALTH_CHECK_INTERVAL_SEC = max(1, int(os.environ.get("HEALTH_CHECK_INTERVAL_SEC") or 30))
+BACKEND_CHECK_TIMEOUT_SEC = max(0.1, float(os.environ.get("BACKEND_CHECK_TIMEOUT_SEC") or 2.5))
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:

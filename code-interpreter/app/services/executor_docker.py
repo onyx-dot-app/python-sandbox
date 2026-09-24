@@ -36,6 +36,7 @@ from app.services.executor_base import (
     StreamChunk,
     StreamEvent,
     StreamResult,
+    StreamStarted,
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
@@ -690,6 +691,7 @@ class DockerExecutor(BaseExecutor):
             files=files,
             last_line_interactive=last_line_interactive,
         ) as ctx:
+            yield StreamStarted()
             _write_stdin(ctx.proc, stdin)
 
             deadline = time.monotonic() + (timeout_ms / 1000.0)

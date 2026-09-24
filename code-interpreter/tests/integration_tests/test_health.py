@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
@@ -9,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import SERVICE_VERSION, create_app
+from app.main import SERVICE_VERSION, create_app, network_isolation_mode
 from app.services.executor_base import HealthCheck
 from app.services.executor_docker import DockerExecutor
 from app.services.executor_factory import get_executor
@@ -36,18 +37,85 @@ def test_health_returns_ok_when_backend_healthy() -> None:
     assert body["version"] == SERVICE_VERSION
 
 
-def test_health_returns_error_when_backend_unhealthy() -> None:
+def test_ready_returns_503_and_health_reports_error_when_backend_unhealthy() -> None:
     unhealthy = HealthCheck(status="error", message="daemon down")
 
     with patch.object(DockerExecutor, "check_health", return_value=unhealthy):
         client = TestClient(create_app())
-        response = client.get("/health")
+        ready = client.get("/ready")
+        health = client.get("/health")
 
-    assert response.status_code == 200
-    body = response.json()
+    assert ready.status_code == 503
+    assert ready.json()["status"] == "error"
+    assert ready.json()["message"] == "daemon down"
+
+    # /health stays 200 for the liveness probe but reports the cached result.
+    assert health.status_code == 200
+    body = health.json()
     assert body["status"] == "error"
     assert body["message"] == "daemon down"
     assert body["version"] == SERVICE_VERSION
+
+
+def test_ready_returns_200_when_backend_healthy() -> None:
+    with patch.object(DockerExecutor, "check_health", return_value=HealthCheck(status="ok")):
+        client = TestClient(create_app())
+        response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_ready_times_out_slow_backend_check() -> None:
+    def _slow_check(self: DockerExecutor) -> HealthCheck:
+        time.sleep(1.0)
+        return HealthCheck(status="ok")
+
+    with (
+        patch("app.main.BACKEND_CHECK_TIMEOUT_SEC", 0.1),
+        patch.object(DockerExecutor, "check_health", _slow_check),
+    ):
+        client = TestClient(create_app())
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert "timed out" in response.json()["message"]
+
+
+def test_health_never_calls_executor_backend() -> None:
+    """Liveness must not wait on the Docker daemon or the Kubernetes API."""
+    with (
+        patch("app.main.get_executor") as get_executor_mock,
+        patch.object(DockerExecutor, "check_health") as check_mock,
+    ):
+        client = TestClient(create_app())
+        for _ in range(3):
+            assert client.get("/health").status_code == 200
+
+    get_executor_mock.assert_not_called()
+    check_mock.assert_not_called()
+
+
+def test_health_reports_backend_and_network_isolation() -> None:
+    client = TestClient(create_app())
+    body = client.get("/health").json()
+    assert body["executor_backend"] == "docker"
+    assert body["network_isolation"].startswith("docker_network:")
+
+
+@pytest.mark.parametrize(
+    ("net_admin", "expected"),
+    [
+        (True, "net_admin_init_container+network_policy"),
+        (False, "network_policy_only"),
+    ],
+)
+def test_network_isolation_mode_for_kubernetes(net_admin: bool, expected: str) -> None:
+    with (
+        patch("app.main.EXECUTOR_BACKEND", "kubernetes"),
+        patch("app.main.KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN", net_admin),
+    ):
+        assert network_isolation_mode() == expected
 
 
 def test_health_version_matches_package_metadata() -> None:
