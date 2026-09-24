@@ -76,6 +76,16 @@ helm install code-interpreter ./code-interpreter -f my-values.yaml
 | `codeInterpreter.kubernetesExecutor.securityContext.mode` | `fixed` uses the IDs below; `platform` lets the platform assign them | `fixed` |
 | `codeInterpreter.kubernetesExecutor.securityContext.runAsUser` / `runAsGroup` / `fsGroup` | Execution pod IDs in `fixed` mode; `null` omits one | `65532` |
 | `codeInterpreter.kubernetesExecutor.securityContext.readOnlyRootFilesystem` | Mount the execution container root filesystem read-only | `true` |
+| `codeInterpreter.kubernetesExecutor.podResources` | Execution container `requests` (cpu, memory, ephemeral-storage) and `limits` (cpu, ephemeral-storage); the memory limit is `memoryLimitMb` | requests `cpu: 100m`, `memory: 64Mi`; limits `cpu: "1"` |
+| `codeInterpreter.kubernetesExecutor.workspaceSizeLimit` | Size limit of the `/workspace` emptyDir | `100Mi` |
+| `codeInterpreter.kubernetesExecutor.tmpSizeLimit` | Size limit of the `/tmp` emptyDir | `64Mi` |
+| `codeInterpreter.kubernetesExecutor.pod.nodeSelector` | Node selector of execution pods | `{}` |
+| `codeInterpreter.kubernetesExecutor.pod.tolerations` | Tolerations of execution pods | `[]` |
+| `codeInterpreter.kubernetesExecutor.pod.affinity` | Affinity of execution pods | `{}` |
+| `codeInterpreter.kubernetesExecutor.pod.topologySpreadConstraints` | Topology spread constraints of execution pods | `[]` |
+| `codeInterpreter.kubernetesExecutor.pod.priorityClassName` | Priority class of execution pods | `""` |
+| `codeInterpreter.kubernetesExecutor.pod.runtimeClassName` | Runtime class of execution pods, e.g. `gvisor` | `""` |
+| `codeInterpreter.kubernetesExecutor.pod.labels` / `annotations` | Extra metadata of execution pods; `app`, `component` and the expiry annotation are reserved | `{}` |
 | `service.type` | Kubernetes service type | `ClusterIP` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `rbac.create` | Create RBAC resources | `true` |
@@ -159,6 +169,55 @@ codeInterpreter:
 
 A pinned tag uses pull policy `IfNotPresent`. Set `imagePullPolicy` to override it,
 for example `IfNotPresent` or `Never` for nodes that cannot reach the registry.
+
+### Dedicated node pool
+
+The top-level `nodeSelector`, `tolerations` and `affinity` apply only to the service
+pod. To run execution pods, which run user code, on their own tainted node pool, use
+`codeInterpreter.kubernetesExecutor.pod`:
+
+```yaml
+# kubectl label node <node> onyx.app/pool=sandbox
+# kubectl taint node <node> onyx.app/sandbox=true:NoSchedule
+codeInterpreter:
+  kubernetesExecutor:
+    pod:
+      nodeSelector:
+        onyx.app/pool: sandbox
+      tolerations:
+        - key: onyx.app/sandbox
+          operator: Exists
+          effect: NoSchedule
+```
+
+The service validates these values at startup and does not start if they are not
+valid. It does not let them change the `app` and `component` labels, the expiry
+annotation or the ownerReference. A pod that no node can take fails the request after
+`readyTimeoutSec` with `phase=Pending`.
+
+### Execution pod resources
+
+```yaml
+codeInterpreter:
+  memoryLimitMb: 512          # memory limit of execution pods
+  kubernetesExecutor:
+    podResources:
+      requests:
+        cpu: 250m
+        memory: 256Mi         # capped at memoryLimitMb
+        ephemeral-storage: 256Mi
+      limits:
+        cpu: "2"              # null removes the CPU limit
+        ephemeral-storage: 1Gi
+    workspaceSizeLimit: 500Mi
+    tmpSizeLimit: 128Mi
+```
+
+`podResources.limits.memory` is not supported: the chart fails to render if you set
+it. `codeInterpreter.cpuTimeLimitSec` does not apply to execution pods; the
+execution timeout bounds their run time. With the read-only root filesystem, the
+emptyDir size limits bound what user code can write. Kubelet evicts a pod that goes
+over a limit, so the write itself does not fail at once.
 
 ### Restricted Pod Security and OpenShift
 

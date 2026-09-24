@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -32,15 +32,27 @@ from app.app_configs import (
     KUBERNETES_EXECUTOR_IMAGE_PULL_POLICY,
     KUBERNETES_EXECUTOR_NAMESPACE,
     KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN,
+    KUBERNETES_EXECUTOR_POD_OVERRIDES,
+    KUBERNETES_EXECUTOR_POD_RESOURCES,
     KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM,
     KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC,
     KUBERNETES_EXECUTOR_RUN_AS_GROUP,
     KUBERNETES_EXECUTOR_RUN_AS_USER,
     KUBERNETES_EXECUTOR_SERVICE_ACCOUNT,
+    KUBERNETES_EXECUTOR_TMP_SIZE_LIMIT,
+    KUBERNETES_EXECUTOR_WORKSPACE_SIZE_LIMIT,
     KUBERNETES_OWN_NAMESPACE,
     KUBERNETES_OWNER_DEPLOYMENT_NAME,
 )
 from app.image_ref import default_image_pull_policy
+from app.kubernetes_pod_config import (
+    DEFAULT_TMP_SIZE_LIMIT,
+    DEFAULT_WORKSPACE_SIZE_LIMIT,
+    ExecutorPodOverrides,
+    ExecutorPodResources,
+    parse_pod_resources,
+    quantity_to_mebibytes,
+)
 from app.services.executor_base import (
     SESSION_APP_LABEL,
     SESSION_COMPONENT_LABEL,
@@ -151,6 +163,12 @@ class ExecutorPodSettings(BaseModel):
     run_as_group: int | None = DEFAULT_EXECUTOR_ID
     fs_group: int | None = DEFAULT_EXECUTOR_ID
     read_only_root_filesystem: bool = True
+    overrides: ExecutorPodOverrides = field(default_factory=ExecutorPodOverrides)
+    resources: ExecutorPodResources = field(
+        default_factory=lambda: parse_pod_resources("resources", None)
+    )
+    workspace_size_limit: str = DEFAULT_WORKSPACE_SIZE_LIMIT
+    tmp_size_limit: str = DEFAULT_TMP_SIZE_LIMIT
 
     @staticmethod
     def from_env() -> ExecutorPodSettings:
@@ -161,7 +179,39 @@ class ExecutorPodSettings(BaseModel):
             run_as_group=KUBERNETES_EXECUTOR_RUN_AS_GROUP,
             fs_group=KUBERNETES_EXECUTOR_FS_GROUP,
             read_only_root_filesystem=KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM,
+            overrides=KUBERNETES_EXECUTOR_POD_OVERRIDES,
+            resources=KUBERNETES_EXECUTOR_POD_RESOURCES,
+            workspace_size_limit=KUBERNETES_EXECUTOR_WORKSPACE_SIZE_LIMIT,
+            tmp_size_limit=KUBERNETES_EXECUTOR_TMP_SIZE_LIMIT,
         )
+
+
+def executor_container_resources(
+    resources: ExecutorPodResources, memory_limit_mb: int | None
+) -> dict[str, dict[str, str]]:
+    """Requests and limits of the executor container.
+
+    ``memory_limit_mb`` (MEMORY_LIMIT_MB) is the memory limit. The configured memory
+    request is capped at it, because Kubernetes rejects a request above the limit.
+    """
+    requests: dict[str, str] = {
+        name: value for name, value in resources.requests.items() if value is not None
+    }
+    limits: dict[str, str] = {
+        name: value for name, value in resources.limits.items() if value is not None
+    }
+    if memory_limit_mb is not None:
+        memory_limit = max(memory_limit_mb, 16)
+        limits["memory"] = f"{memory_limit}Mi"
+        memory_request = requests.get("memory")
+        if memory_request is not None and quantity_to_mebibytes(memory_request) > memory_limit:
+            requests["memory"] = limits["memory"]
+    result: dict[str, dict[str, str]] = {}
+    if requests:
+        result["requests"] = requests
+    if limits:
+        result["limits"] = limits
+    return result
 
 
 def _pod_start_failure(pod: V1Pod) -> str | None:
@@ -348,27 +398,17 @@ class KubernetesExecutor(BaseExecutor):
         annotations: Mapping[str, str] | None = None,
         active_deadline_seconds: int | None = None,
         memory_limit_mb: int | None = None,
-        cpu_time_limit_sec: int | None = None,
     ) -> V1Pod:
         """Build a Kubernetes pod manifest for an isolated executor container.
 
         ``command`` is the executor container's command (e.g. ``["sleep", "3600"]``).
         ``active_deadline_seconds``, when set, instructs kubelet to stop the pod
         at that age, which bounds the pod's life even if this service is down.
+        ``labels`` and ``annotations`` take precedence over the configured overrides.
         """
-        resources: dict[str, dict[str, Any]] = {"limits": {}, "requests": {}}
-
-        if memory_limit_mb is not None:
-            memory_limit = max(memory_limit_mb, 16)
-            resources["limits"]["memory"] = f"{memory_limit}Mi"
-            resources["requests"]["memory"] = f"{min(memory_limit, 64)}Mi"
-
-        if cpu_time_limit_sec is not None:
-            cpu_limit = max(cpu_time_limit_sec, 1)
-            resources["limits"]["cpu"] = str(cpu_limit)
-            resources["requests"]["cpu"] = "100m"
-
         settings = self.pod_settings
+        overrides = settings.overrides
+        resources = executor_container_resources(settings.resources, memory_limit_mb)
         image_pull_policy = settings.image_pull_policy or default_image_pull_policy(self.image)
 
         container_security_context: dict[str, Any] = {
@@ -387,7 +427,7 @@ class KubernetesExecutor(BaseExecutor):
             image_pull_policy=image_pull_policy,
             command=list(command),
             working_dir="/workspace",
-            resources=resources if resources["limits"] else None,
+            resources=resources or None,
             security_context=container_security_context,
             env=[
                 # The image has no passwd entry for the executor user, so HOME is "/".
@@ -451,17 +491,37 @@ class KubernetesExecutor(BaseExecutor):
             service_account_name=self.service_account if self.service_account else None,
             automount_service_account_token=False,
             volumes=[
-                {"name": "workspace", "emptyDir": {"sizeLimit": "100Mi"}},
-                {"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}},
+                {"name": "workspace", "emptyDir": {"sizeLimit": settings.workspace_size_limit}},
+                {"name": "tmp", "emptyDir": {"sizeLimit": settings.tmp_size_limit}},
             ],
             security_context=pod_security_context,
+            node_selector=dict(overrides.node_selector) or None,
+            tolerations=[
+                toleration.model_dump(by_alias=True, exclude_none=True)
+                for toleration in overrides.tolerations
+            ]
+            or None,
+            affinity=(
+                overrides.affinity.model_dump(by_alias=True, exclude_none=True)
+                if overrides.affinity is not None
+                else None
+            )
+            or None,
+            topology_spread_constraints=[
+                constraint.model_dump(by_alias=True, exclude_none=True)
+                for constraint in overrides.topology_spread_constraints
+            ]
+            or None,
+            priority_class_name=overrides.priority_class_name,
+            runtime_class_name=overrides.runtime_class_name,
         )
 
+        pod_annotations = {**overrides.annotations, **(annotations or {})}
         metadata = V1ObjectMeta(
             name=pod_name,
             namespace=self.namespace,
-            labels=dict(labels),
-            annotations=dict(annotations) if annotations else None,
+            labels={**overrides.labels, **labels},
+            annotations=pod_annotations or None,
             owner_references=[self.owner_reference] if self.owner_reference else None,
         )
 
@@ -722,7 +782,6 @@ class KubernetesExecutor(BaseExecutor):
         *,
         code: str,
         timeout_ms: int,
-        cpu_time_limit_sec: int | None,
         memory_limit_mb: int | None,
         files: Sequence[tuple[str, bytes]] | None,
         last_line_interactive: bool,
@@ -745,7 +804,6 @@ class KubernetesExecutor(BaseExecutor):
             labels={"app": "code-interpreter", "component": "executor"},
             active_deadline_seconds=deadline_seconds,
             memory_limit_mb=memory_limit_mb,
-            cpu_time_limit_sec=cpu_time_limit_sec,
         )
 
         try:
@@ -950,7 +1008,6 @@ class KubernetesExecutor(BaseExecutor):
             annotations={SESSION_EXPIRES_AT_KEY: str(expires_at)},
             active_deadline_seconds=ttl_seconds,
             memory_limit_mb=memory_limit_mb,
-            cpu_time_limit_sec=cpu_time_limit_sec,
         )
 
         logger.info(
@@ -1103,7 +1160,6 @@ class KubernetesExecutor(BaseExecutor):
         with self._run_in_pod(
             code=code,
             timeout_ms=timeout_ms,
-            cpu_time_limit_sec=cpu_time_limit_sec,
             memory_limit_mb=memory_limit_mb,
             files=files,
             last_line_interactive=last_line_interactive,
@@ -1163,7 +1219,6 @@ class KubernetesExecutor(BaseExecutor):
         with self._run_in_pod(
             code=code,
             timeout_ms=timeout_ms,
-            cpu_time_limit_sec=cpu_time_limit_sec,
             memory_limit_mb=memory_limit_mb,
             files=files,
             last_line_interactive=last_line_interactive,

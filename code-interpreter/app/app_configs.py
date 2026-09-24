@@ -5,6 +5,16 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Final
 
+from app.kubernetes_pod_config import (
+    DEFAULT_TMP_SIZE_LIMIT,
+    DEFAULT_WORKSPACE_SIZE_LIMIT,
+    ExecutorPodOverrides,
+    ExecutorPodResources,
+    parse_pod_overrides,
+    parse_pod_resources,
+    parse_size_limit,
+)
+
 IMAGE_PULL_POLICIES: Final[frozenset[str]] = frozenset({"Always", "IfNotPresent", "Never"})
 DEFAULT_EXECUTOR_ID: Final[int] = 65532
 
@@ -112,10 +122,32 @@ KUBERNETES_EXECUTOR_FS_GROUP: Final[int | None] = _optional_id_env(
 KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM: Final[bool] = (
     os.environ.get("KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM") or "true"
 ).lower() not in ("false", "0", "no")
+# JSON with nodeSelector, tolerations, affinity, topologySpreadConstraints,
+# priorityClassName, runtimeClassName, labels and annotations for executor pods.
+KUBERNETES_EXECUTOR_POD_OVERRIDES: Final[ExecutorPodOverrides] = parse_pod_overrides(
+    "KUBERNETES_EXECUTOR_POD_OVERRIDES", os.environ.get("KUBERNETES_EXECUTOR_POD_OVERRIDES")
+)
+# JSON {"requests": {...}, "limits": {...}} for cpu, memory (requests only) and
+# ephemeral-storage. Unset means requests cpu=100m, memory=64Mi and limits cpu=1.
+KUBERNETES_EXECUTOR_POD_RESOURCES: Final[ExecutorPodResources] = parse_pod_resources(
+    "KUBERNETES_EXECUTOR_POD_RESOURCES", os.environ.get("KUBERNETES_EXECUTOR_POD_RESOURCES")
+)
+KUBERNETES_EXECUTOR_WORKSPACE_SIZE_LIMIT: Final[str] = parse_size_limit(
+    "KUBERNETES_EXECUTOR_WORKSPACE_SIZE_LIMIT",
+    os.environ.get("KUBERNETES_EXECUTOR_WORKSPACE_SIZE_LIMIT"),
+    DEFAULT_WORKSPACE_SIZE_LIMIT,
+)
+KUBERNETES_EXECUTOR_TMP_SIZE_LIMIT: Final[str] = parse_size_limit(
+    "KUBERNETES_EXECUTOR_TMP_SIZE_LIMIT",
+    os.environ.get("KUBERNETES_EXECUTOR_TMP_SIZE_LIMIT"),
+    DEFAULT_TMP_SIZE_LIMIT,
+)
 
 # Execution limits
 MAX_EXEC_TIMEOUT_MS = int(os.environ.get("MAX_EXEC_TIMEOUT_MS") or 60_000)
 MAX_OUTPUT_BYTES = int(os.environ.get("MAX_OUTPUT_BYTES") or 1_000_000)
+# Docker only: the RLIMIT_CPU of the executor container. Kubernetes executor pods
+# are bounded by the execution timeout and by KUBERNETES_EXECUTOR_POD_RESOURCES.
 CPU_TIME_LIMIT_SEC = int(os.environ.get("CPU_TIME_LIMIT_SEC") or 5)
 MEMORY_LIMIT_MB = int(os.environ.get("MEMORY_LIMIT_MB") or 256)
 

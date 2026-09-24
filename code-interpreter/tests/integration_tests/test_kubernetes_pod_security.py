@@ -173,7 +173,6 @@ def test_execute_pod_has_active_deadline(executor: KubernetesExecutor) -> None:
         executor._run_in_pod(
             code="print(1)",
             timeout_ms=10_500,
-            cpu_time_limit_sec=None,
             memory_limit_mb=None,
             files=None,
             last_line_interactive=False,

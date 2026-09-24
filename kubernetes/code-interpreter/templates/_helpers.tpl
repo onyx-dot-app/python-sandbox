@@ -94,6 +94,9 @@ Reject value combinations that cannot work.
 {{- if not (has $mode (list "fixed" "platform")) -}}
 {{- fail (printf "codeInterpreter.kubernetesExecutor.securityContext.mode must be \"fixed\" or \"platform\", got %q" $mode) -}}
 {{- end -}}
+{{- if (($executor.podResources | default dict).limits | default dict).memory -}}
+{{- fail "codeInterpreter.kubernetesExecutor.podResources.limits.memory is not supported: the memory limit of execution pods is codeInterpreter.memoryLimitMb. Remove limits.memory and set memoryLimitMb instead." -}}
+{{- end -}}
 {{- if and (eq $mode "platform") $executor.netAdminLockdown -}}
 {{- fail "codeInterpreter.kubernetesExecutor.securityContext.mode=platform requires codeInterpreter.kubernetesExecutor.netAdminLockdown=false: the lockdown init container runs as root with NET_ADMIN, which restricted admission (Pod Security \"restricted\", OpenShift restricted-v2) rejects. Enforce egress with the executor NetworkPolicy instead." -}}
 {{- end -}}
