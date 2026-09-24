@@ -71,3 +71,30 @@ Get the namespace for Kubernetes executor
 {{- .Release.Namespace }}
 {{- end }}
 {{- end }}
+
+{{/*
+Quoted executor pod ID for the given (list mode id). Empty in platform mode or when unset.
+*/}}
+{{- define "code-interpreter.executorId" -}}
+{{- $mode := index . 0 -}}
+{{- $id := index . 1 -}}
+{{- if or (eq $mode "platform") (kindIs "invalid" $id) -}}
+""
+{{- else -}}
+{{- int64 $id | quote -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Reject value combinations that cannot work.
+*/}}
+{{- define "code-interpreter.validateValues" -}}
+{{- $executor := .Values.codeInterpreter.kubernetesExecutor -}}
+{{- $mode := ($executor.securityContext | default dict).mode | default "fixed" -}}
+{{- if not (has $mode (list "fixed" "platform")) -}}
+{{- fail (printf "codeInterpreter.kubernetesExecutor.securityContext.mode must be \"fixed\" or \"platform\", got %q" $mode) -}}
+{{- end -}}
+{{- if and (eq $mode "platform") $executor.netAdminLockdown -}}
+{{- fail "codeInterpreter.kubernetesExecutor.securityContext.mode=platform requires codeInterpreter.kubernetesExecutor.netAdminLockdown=false: the lockdown init container runs as root with NET_ADMIN, which restricted admission (Pod Security \"restricted\", OpenShift restricted-v2) rejects. Enforce egress with the executor NetworkPolicy instead." -}}
+{{- end -}}
+{{- end }}

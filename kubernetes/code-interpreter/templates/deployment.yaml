@@ -1,3 +1,4 @@
+{{- include "code-interpreter.validateValues" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -63,6 +64,21 @@ spec:
               value: {{ .Values.codeInterpreter.kubernetesExecutor.image | quote }}
             - name: KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN
               value: {{ .Values.codeInterpreter.kubernetesExecutor.netAdminLockdown | quote }}
+            - name: KUBERNETES_EXECUTOR_IMAGE_PULL_POLICY
+              value: {{ .Values.codeInterpreter.kubernetesExecutor.imagePullPolicy | quote }}
+            - name: KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC
+              value: {{ .Values.codeInterpreter.kubernetesExecutor.readyTimeoutSec | quote }}
+            {{- with .Values.codeInterpreter.kubernetesExecutor.securityContext }}
+            # Empty IDs let the platform assign them.
+            - name: KUBERNETES_EXECUTOR_RUN_AS_USER
+              value: {{ include "code-interpreter.executorId" (list .mode .runAsUser) }}
+            - name: KUBERNETES_EXECUTOR_RUN_AS_GROUP
+              value: {{ include "code-interpreter.executorId" (list .mode .runAsGroup) }}
+            - name: KUBERNETES_EXECUTOR_FS_GROUP
+              value: {{ include "code-interpreter.executorId" (list .mode .fsGroup) }}
+            - name: KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM
+              value: {{ .readOnlyRootFilesystem | quote }}
+            {{- end }}
             {{- if .Values.codeInterpreter.kubernetesExecutor.serviceAccount }}
             - name: KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
               value: {{ .Values.codeInterpreter.kubernetesExecutor.serviceAccount | quote }}

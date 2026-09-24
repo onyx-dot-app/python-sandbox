@@ -68,8 +68,14 @@ helm install code-interpreter ./code-interpreter -f my-values.yaml
 | `image.tag` | Container image tag | `""` (uses chart appVersion) |
 | `codeInterpreter.maxExecTimeoutMs` | Maximum execution timeout in milliseconds | `60000` |
 | `codeInterpreter.memoryLimitMb` | Memory limit for code execution in MB | `256` |
-| `codeInterpreter.kubernetesExecutor.image` | Container image used for execution pods | `python-executor-sci` |
+| `codeInterpreter.kubernetesExecutor.image` | Container image used for execution pods | `""` (`onyxdotapp/python-executor-sci`, untagged) |
+| `codeInterpreter.kubernetesExecutor.imagePullPolicy` | Pull policy for execution pods; empty follows Kubernetes (`Always` for `:latest`, else `IfNotPresent`) | `""` |
+| `codeInterpreter.kubernetesExecutor.readyTimeoutSec` | Seconds to wait for an execution pod to reach Running (1-600) | `30` |
+| `codeInterpreter.kubernetesExecutor.netAdminLockdown` | Add the root NET_ADMIN init container that blocks egress with iptables | `true` |
 | `codeInterpreter.kubernetesExecutor.setOwnerReferences` | Give execution pods an ownerReference to this chart's Deployment | `true` |
+| `codeInterpreter.kubernetesExecutor.securityContext.mode` | `fixed` uses the IDs below; `platform` lets the platform assign them | `fixed` |
+| `codeInterpreter.kubernetesExecutor.securityContext.runAsUser` / `runAsGroup` / `fsGroup` | Execution pod IDs in `fixed` mode; `null` omits one | `65532` |
+| `codeInterpreter.kubernetesExecutor.securityContext.readOnlyRootFilesystem` | Mount the execution container root filesystem read-only | `true` |
 | `service.type` | Kubernetes service type | `ClusterIP` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `rbac.create` | Create RBAC resources | `true` |
@@ -106,10 +112,15 @@ helm install code-interpreter ./code-interpreter \
 
 The chart always uses the Kubernetes executor to run ephemeral pods for code execution:
 
-- Pods run with a restricted security context
+- Pods run with seccomp `RuntimeDefault`, all capabilities dropped, no privilege
+  escalation, a read-only root filesystem and no service account token
 - Resource limits are enforced per execution
-- Pods are cleaned up automatically after completion
+- Pods are cleaned up automatically after completion. `activeDeadlineSeconds` also
+  stops a pod that the service fails to delete: execution pods after the ready
+  timeout plus the execution timeout plus 120 seconds, session pods at their TTL
 - No privileged host access is required
+- A pod that cannot start (image pull error, container config error, failed phase)
+  fails the request at once with the reason
 
 Required RBAC permissions (automatically created when `rbac.create=true`):
 - Create, get, list, watch, delete pods
@@ -133,6 +144,59 @@ the reference, and logs why, when the read is not permitted or when
 service: Kubernetes does not honour ownerReferences across namespaces, and would treat
 the owner as already deleted.
 
+### Image pinning
+
+By default, execution pods use `onyxdotapp/python-executor-sci` with no tag, which
+means `:latest` and pull policy `Always`. Each execution pod then asks the registry
+for the current digest. Executor images are published with a version tag, so for
+reproducible installs pin one:
+
+```yaml
+codeInterpreter:
+  kubernetesExecutor:
+    image: onyxdotapp/python-executor-sci:0.4.7
+```
+
+A pinned tag uses pull policy `IfNotPresent`. Set `imagePullPolicy` to override it,
+for example `IfNotPresent` or `Never` for nodes that cannot reach the registry.
+
+### Restricted Pod Security and OpenShift
+
+Execution pods satisfy the Kubernetes `restricted` Pod Security Standard only when
+`netAdminLockdown` is `false`. The lockdown init container runs as root with
+`NET_ADMIN`, which `restricted` does not allow. Without it, the executor
+NetworkPolicy (`templates/networkpolicy.yaml`) is the only egress control, so your
+CNI must enforce NetworkPolicies.
+
+```yaml
+# Namespace labelled pod-security.kubernetes.io/enforce=restricted
+codeInterpreter:
+  kubernetesExecutor:
+    netAdminLockdown: false
+```
+
+OpenShift `restricted-v2` also assigns the user and fsGroup from the namespace
+range, and rejects the fixed ID `65532`. Use `platform` mode, and let OpenShift
+assign the IDs of the service pod too:
+
+```yaml
+podSecurityContext:
+  runAsUser: null
+  fsGroup: null
+securityContext:
+  runAsUser: null
+codeInterpreter:
+  kubernetesExecutor:
+    netAdminLockdown: false
+    securityContext:
+      mode: platform
+```
+
+The chart fails to render when `mode: platform` is set with `netAdminLockdown: true`.
+`platform` mode needs an admission controller that assigns a user ID, because the
+executor image runs as root by default. On other clusters, keep `fixed` mode and set
+IDs that your policy allows.
+
 ## Security Considerations
 
 1. **Network Policies**: Enable network policies to restrict traffic:
@@ -144,10 +208,11 @@ networkPolicy:
     - Egress
 ```
 
-2. **Pod Security Standards**: The chart follows security best practices:
+2. **Pod Security Standards**: The service pod meets the `restricted` standard.
+   Execution pods meet it when `netAdminLockdown` is `false` (see above).
    - Runs as non-root by default
-   - Drops all capabilities
-   - Uses read-only root filesystem where possible
+   - Drops all capabilities and uses seccomp `RuntimeDefault`
+   - Execution pods use a read-only root filesystem
 
 3. **Resource Limits**: Always set appropriate resource limits:
 ```yaml

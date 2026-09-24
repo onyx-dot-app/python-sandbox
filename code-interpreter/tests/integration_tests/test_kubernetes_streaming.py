@@ -17,7 +17,7 @@ import pytest
 from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 
 from app.services.executor_base import StreamChunk, StreamEvent, StreamResult
-from app.services.executor_kubernetes import KubernetesExecutor
+from app.services.executor_kubernetes import ExecutorPodSettings, KubernetesExecutor
 
 # ---------------------------------------------------------------------------
 # Fixtures & helpers
@@ -34,6 +34,7 @@ def executor() -> KubernetesExecutor:
     inst.service_account = ""
     inst.net_admin_lockdown = True
     inst.owner_reference = None
+    inst.pod_settings = ExecutorPodSettings()
     pod_mock = MagicMock()
     pod_mock.status.phase = "Running"
 

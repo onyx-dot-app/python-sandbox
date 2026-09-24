@@ -32,6 +32,8 @@ podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   capabilities:
@@ -109,7 +111,17 @@ codeInterpreter:
   # Kubernetes executor configuration
   kubernetesExecutor:
     namespace: ""  # Empty means use the same namespace as the service
-    image: ""  # Empty means used the default in code: `
+    # Empty means onyxdotapp/python-executor-sci with no tag (":latest"). Pin a
+    # published tag, e.g. "onyxdotapp/python-executor-sci:0.4.7", for
+    # reproducible installs and to avoid a registry round trip per execution.
+    image: ""
+    # Pull policy for execution pods: Always, IfNotPresent or Never. Empty
+    # follows Kubernetes: Always for an untagged or ":latest" image, otherwise
+    # IfNotPresent.
+    imagePullPolicy: ""
+    # Seconds to wait for an execution pod to reach Running, including the image
+    # pull (1-600). Image pull errors fail the request at once.
+    readyTimeoutSec: 30
     serviceAccount: ""  # Empty means use default service account for pods
     # When true, executor pods run a privileged init container that uses the
     # NET_ADMIN capability to apply iptables rules dropping all outbound traffic
@@ -131,6 +143,18 @@ codeInterpreter:
     # kubernetesExecutor.namespace names a different namespace than the service,
     # because Kubernetes does not honour ownerReferences across namespaces.
     setOwnerReferences: true
+    # Security context of execution pods. Pods always run with seccomp
+    # RuntimeDefault, no service account token and all capabilities dropped.
+    securityContext:
+      # "fixed" runs execution pods as the IDs below. "platform" omits them, so
+      # the platform assigns them (OpenShift restricted-v2). Platform mode needs
+      # netAdminLockdown: false, because the lockdown container runs as root.
+      mode: fixed
+      runAsUser: 65532
+      runAsGroup: 65532
+      fsGroup: 65532
+      # User code can write only to /workspace and /tmp when this is true.
+      readOnlyRootFilesystem: true
     # Resource limits for execution pods
     podResources:
       limits:
