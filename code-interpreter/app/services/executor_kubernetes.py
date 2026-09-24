@@ -652,13 +652,17 @@ class KubernetesExecutor(BaseExecutor):
         """Wait for a pod to reach Running, failing fast when it never can.
 
         Raises ExecutorPodStartError on an image pull failure, a container that
-        cannot be created, a terminal pod phase, or the ready timeout.
+        cannot be created, a terminal pod phase, or the ready timeout. Raises
+        ExecutorCapacityError (UNSCHEDULABLE) if the pod is still unschedulable at
+        the deadline. The scheduler marks a pod Unschedulable as soon as no node
+        fits, before a cluster autoscaler can add one, so that is not fatal early.
         """
         timeout_sec = self.pod_settings.ready_timeout_sec
         logger.info(f"Waiting up to {timeout_sec}s for pod {pod_name} to be ready")
         deadline = time.monotonic() + timeout_sec
         phase: str | None = None
         last_waiting: str | None = None
+        unschedulable: ExecutorCapacityError | None = None
         while True:
             pod = self.v1.read_namespaced_pod(pod_name, self.namespace)
             phase = pod.status.phase if pod.status else None
@@ -671,9 +675,15 @@ class KubernetesExecutor(BaseExecutor):
                 raise ExecutorPodStartError(
                     f"Executor pod {pod_name} (image {self.image}) cannot start: {failure}"
                 )
+            unschedulable = pod_unschedulable_error(pod)
             if time.monotonic() >= deadline:
                 break
             time.sleep(POD_READY_POLL_INTERVAL_SECONDS)
+        if unschedulable is not None:
+            logger.warning(
+                "Pod %s still unschedulable after %ss: %s", pod_name, timeout_sec, unschedulable
+            )
+            raise unschedulable
         waiting_note = f", last waiting reason: {last_waiting}" if last_waiting else ""
         raise ExecutorPodStartError(
             f"Executor pod {pod_name} did not become ready in {timeout_sec} seconds "

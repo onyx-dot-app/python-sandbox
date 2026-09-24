@@ -811,13 +811,19 @@ the executor resources one replica can request (16 x 256Mi memory limit).
 |--------|--------|---------|---------------|
 | 429 | `concurrency_limit` | This replica is at `MAX_CONCURRENT_EXECUTIONS`. The cluster can still have room. | `EXECUTION_RETRY_AFTER_SEC` (2s) |
 | 503 | `quota_exceeded` | Pod creation failed because the executor namespace ResourceQuota is exhausted. | `CAPACITY_RETRY_AFTER_SEC` (10s) |
-| 503 | `unschedulable` | The scheduler cannot place the executor pod (for example, insufficient CPU). | `CAPACITY_RETRY_AFTER_SEC` (10s) |
+| 503 | `unschedulable` | The executor pod is still Unschedulable at `KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC` (for example, insufficient CPU). | `CAPACITY_RETRY_AFTER_SEC` (10s) |
 
 429 is about one replica, so a retry can succeed at once on another replica. 503 is
 about the executor backend as a whole, so clients should back off longer. Both use the
 normal error body, `{"detail": "..."}`. Other 403 errors on pod creation (missing RBAC,
 a quota that needs limits the pod does not set) are configuration errors. They stay
 500 because a retry cannot fix them.
+
+The scheduler marks a pod Unschedulable as soon as no node fits, before a cluster
+autoscaler can add one. So the service keeps waiting until the ready timeout, and
+returns 503 only if the pod is still Unschedulable then. Image pull and container
+creation failures take precedence: they fail at once as a start error (500), because a
+retry cannot fix them.
 
 `/v1/execute/stream` returns 422, 429 and 503 before the event stream opens. The
 executor emits an internal "started" event once the sandbox runs, and the route waits

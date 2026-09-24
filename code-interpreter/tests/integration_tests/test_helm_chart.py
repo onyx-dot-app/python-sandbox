@@ -67,3 +67,37 @@ def test_legacy_memory_limit_is_dropped_with_a_warning(tmp_path: Path) -> None:
     assert resources["limits"] == {"cpu": "5"}
     assert f"WARNING: {LEGACY_MEMORY_LIMIT} (256Mi) is ignored" in notes
     assert "memoryLimitMb" in notes
+
+
+def test_capacity_settings_render(tmp_path: Path) -> None:
+    env, notes = _render(tmp_path, "capacity.maxConcurrentExecutions=8")
+    assert env["MAX_CONCURRENT_EXECUTIONS"] == "8"
+    assert env["EXECUTION_QUEUE_TIMEOUT_SEC"] == "30"
+    assert "Max Concurrent Executions per replica: 8 (429 after 30s" in notes
+
+
+def _template_fails(*sets: str) -> str | None:
+    args = ["helm", "template", "t", str(CHART)]
+    for value in sets:
+        args += ["--set", value]
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    return result.stderr if result.returncode != 0 else None
+
+
+def test_multiple_replicas_need_shared_file_storage() -> None:
+    error = _template_fails("replicaCount=2")
+    assert error is not None and "fileStorage.shared=true" in error
+    assert _template_fails("replicaCount=2", "fileStorage.shared=true") is None
+
+
+def test_executor_resource_quota_needs_dedicated_namespace() -> None:
+    error = _template_fails("executorResourceQuota.enabled=true")
+    assert error is not None and "dedicated namespace" in error
+    assert (
+        _template_fails(
+            "executorResourceQuota.enabled=true",
+            "codeInterpreter.kubernetesExecutor.namespace=sandbox",
+            "metrics.serviceMonitor.enabled=true",
+        )
+        is None
+    )

@@ -173,6 +173,11 @@ Release notes. NOTES.txt includes this so that tests can render it with helm tem
   - Executor Image: {{ .Values.codeInterpreter.kubernetesExecutor.image }}
   - Max Timeout: {{ .Values.codeInterpreter.maxExecTimeoutMs }}ms
   - Memory Limit: {{ .Values.codeInterpreter.memoryLimitMb }}MB
+  - Max Concurrent Executions per replica: {{ .Values.capacity.maxConcurrentExecutions }} (429 after {{ .Values.capacity.queueTimeoutSec }}s with no free slot)
+  - Probes: liveness /health, readiness /ready; metrics at /metrics
+{{- if .Values.executorResourceQuota.enabled }}
+  - Executor ResourceQuota: {{ include "code-interpreter.fullname" . }}-executor (503 when exhausted)
+{{- end }}
 
 {{- if .Values.rbac.create }}
 

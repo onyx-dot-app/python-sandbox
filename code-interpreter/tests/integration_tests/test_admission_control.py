@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Generator, Iterator
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from kubernetes.client import (  # type: ignore[import-untyped]
+    V1ContainerState,
+    V1ContainerStateWaiting,
+    V1ContainerStatus,
     V1Pod,
     V1PodCondition,
     V1PodStatus,
@@ -32,6 +36,8 @@ from app.services.executor_base import (
     StreamStarted,
 )
 from app.services.executor_kubernetes import (
+    ExecutorPodSettings,
+    ExecutorPodStartError,
     KubernetesExecutor,
     capacity_error_from_api_exception,
     pod_unschedulable_error,
@@ -285,6 +291,7 @@ def kube_executor() -> KubernetesExecutor:
     inst.service_account = ""
     inst.net_admin_lockdown = True
     inst.owner_reference = None
+    inst.pod_settings = ExecutorPodSettings()
     inst.v1.create_namespaced_pod.side_effect = _forbidden(QUOTA_MESSAGE)
     inst.v1.read_namespaced_pod.side_effect = ApiException(status=404)
     return inst
@@ -393,3 +400,82 @@ def test_default_queue_wait_is_30s_and_waiting_holds_no_thread() -> None:
 
     anyio.run(_run)
     assert results == [True] * 20
+
+
+def _pending_pod(*, unschedulable: bool, image_pull_backoff: bool = False) -> V1Pod:
+    conditions = (
+        [
+            V1PodCondition(
+                type="PodScheduled",
+                status="False",
+                reason="Unschedulable",
+                message="0/1 nodes are available: 1 node(s) didn't match node selector.",
+            )
+        ]
+        if unschedulable
+        else []
+    )
+    container_statuses = (
+        [
+            V1ContainerStatus(
+                name="executor",
+                image="x",
+                image_id="",
+                ready=False,
+                restart_count=0,
+                state=V1ContainerState(
+                    waiting=V1ContainerStateWaiting(reason="ImagePullBackOff", message="nope")
+                ),
+            )
+        ]
+        if image_pull_backoff
+        else None
+    )
+    return V1Pod(
+        status=V1PodStatus(
+            phase="Pending", conditions=conditions, container_statuses=container_statuses
+        )
+    )
+
+
+def _waiting_executor(pods: list[V1Pod], ready_timeout_sec: int = 1) -> KubernetesExecutor:
+    inst = KubernetesExecutor.__new__(KubernetesExecutor)
+    inst.v1 = MagicMock()
+    inst.namespace = "test"
+    inst.image = "test:1"
+    inst.pod_settings = ExecutorPodSettings(ready_timeout_sec=ready_timeout_sec)
+    inst.v1.read_namespaced_pod.side_effect = [*pods, *([pods[-1]] * 100)]
+    return inst
+
+
+def test_wait_raises_unschedulable_capacity_error_only_at_deadline() -> None:
+    inst = _waiting_executor([_pending_pod(unschedulable=True)], ready_timeout_sec=1)
+    start = time.monotonic()
+    with (
+        patch("app.services.executor_kubernetes.POD_READY_POLL_INTERVAL_SECONDS", 0.05),
+        pytest.raises(ExecutorCapacityError) as info,
+    ):
+        inst._wait_for_pod_ready("code-exec-x")
+    assert time.monotonic() - start >= 1.0
+    assert info.value.reason is CapacityReason.UNSCHEDULABLE
+    assert "didn't match node selector" in str(info.value)
+
+
+def test_wait_returns_when_unschedulable_pod_is_scheduled_before_deadline() -> None:
+    running = V1Pod(status=V1PodStatus(phase="Running"))
+    inst = _waiting_executor([_pending_pod(unschedulable=True), running], ready_timeout_sec=5)
+    with patch("app.services.executor_kubernetes.POD_READY_POLL_INTERVAL_SECONDS", 0.01):
+        inst._wait_for_pod_ready("code-exec-x")
+
+
+def test_wait_image_pull_failure_beats_unschedulable() -> None:
+    pod = _pending_pod(unschedulable=True, image_pull_backoff=True)
+    inst = _waiting_executor([pod], ready_timeout_sec=5)
+    with pytest.raises(ExecutorPodStartError):
+        inst._wait_for_pod_ready("code-exec-x")
+
+
+def test_wait_timeout_on_scheduled_pod_is_not_capacity_error() -> None:
+    inst = _waiting_executor([_pending_pod(unschedulable=False)], ready_timeout_sec=0)
+    with pytest.raises(ExecutorPodStartError):
+        inst._wait_for_pod_ready("code-exec-x")
