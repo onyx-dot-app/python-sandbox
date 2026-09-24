@@ -364,3 +364,32 @@ def test_limiter_rejects_immediately_with_zero_queue_timeout() -> None:
         assert limiter.active == 0
 
     anyio.run(_run)
+
+
+def test_default_queue_wait_is_30s_and_waiting_holds_no_thread() -> None:
+    from app.app_configs import EXECUTION_QUEUE_TIMEOUT_SEC, MAX_CONCURRENT_EXECUTIONS
+
+    assert EXECUTION_QUEUE_TIMEOUT_SEC == 30.0
+    assert MAX_CONCURRENT_EXECUTIONS == 16
+    assert create_app().state.execution_limiter.queue_timeout_sec == 30.0
+
+    limiter = ExecutionLimiter(limit=1, queue_timeout_sec=0.3)
+    results: list[bool] = []
+
+    async def _wait() -> None:
+        results.append(await limiter.acquire("execute") is None)
+
+    async def _run() -> None:
+        held = await limiter.acquire("execute")
+        assert held is not None
+        threads_before = threading.active_count()
+        async with anyio.create_task_group() as tg:
+            for _ in range(20):
+                tg.start_soon(_wait)
+            await anyio.sleep(0.1)
+            # Waiters poll on the event loop; none of them occupies a thread.
+            assert threading.active_count() == threads_before
+        held.release()
+
+    anyio.run(_run)
+    assert results == [True] * 20

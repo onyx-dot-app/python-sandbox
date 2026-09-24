@@ -271,7 +271,9 @@ extraEnvFrom: []
 # Retry-After header. See HOW_IT_WORKS.md, "Capacity and overload".
 capacity:
   maxConcurrentExecutions: 16
-  queueTimeoutSec: 5
+  # Keep below the client's request timeout (Onyx: timeout_ms/1000 + 10s,
+  # 70s by default). Queued requests hold no worker thread while they wait.
+  queueTimeoutSec: 30
   # Retry-After (seconds) sent with 429 (this replica is busy).
   retryAfterSec: 2
   # Retry-After (seconds) sent with 503 (executor quota exhausted or executor

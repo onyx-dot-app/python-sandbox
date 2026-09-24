@@ -795,7 +795,9 @@ not for its whole TTL.
 
 The execution routes are `async`. They get a slot on the event loop, then run the
 blocking executor call in the worker thread pool. A request that waits longer than
-`EXECUTION_QUEUE_TIMEOUT_SEC` (default 5s) for a slot is rejected. The thread pool is
+`EXECUTION_QUEUE_TIMEOUT_SEC` (default 30s) for a slot is rejected with 429. The wait
+is an async poll on the event loop, so a queued request holds no worker thread. Keep the
+wait below the client's request timeout (Onyx: `timeout_ms/1000 + 10`s). The thread pool is
 sized at startup to at least `MAX_CONCURRENT_EXECUTIONS + 24`, so admitted executions
 never queue behind each other for a thread.
 

@@ -90,7 +90,7 @@ helm install code-interpreter ./code-interpreter -f my-values.yaml
 | `ingress.enabled` | Enable ingress | `false` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `capacity.maxConcurrentExecutions` | In-flight executions per replica before 429 | `16` |
-| `capacity.queueTimeoutSec` | Wait for a free slot before 429 | `5` |
+| `capacity.queueTimeoutSec` | Wait for a free slot before 429 | `30` |
 | `capacity.retryAfterSec` | `Retry-After` sent with 429 | `2` |
 | `capacity.capacityRetryAfterSec` | `Retry-After` sent with 503 | `10` |
 | `executorResourceQuota.enabled` | Create a ResourceQuota in the executor namespace | `false` |
@@ -312,7 +312,9 @@ Readiness does not fail when the replica is busy. Busy replicas answer 429 (see 
 
 Each replica admits at most `capacity.maxConcurrentExecutions` executions at a time.
 This covers `/v1/execute`, `/v1/execute/stream`, session creation, and session bash
-commands. A request waits up to `capacity.queueTimeoutSec` for a free slot.
+commands. A request waits up to `capacity.queueTimeoutSec` (30s) for a free slot, and
+gets 429 only if no slot frees up in that time. A waiting request holds no worker thread.
+Keep `capacity.queueTimeoutSec` below the client's request timeout (Onyx: `timeout_ms/1000 + 10`s, 70s by default).
 
 | Status | Meaning | Client action |
 |--------|---------|---------------|
@@ -392,8 +394,8 @@ For this reason, the chart fails to render when `replicaCount > 1` unless you se
   `/ready`.
 - Rendering fails for `replicaCount > 1` unless `fileStorage.shared=true`. See
   [File Storage and Replicas](#file-storage-and-replicas).
-- Executions over `capacity.maxConcurrentExecutions` per replica get 429 with
-  `Retry-After`.
+- Executions over `capacity.maxConcurrentExecutions` (16) per replica wait up to
+  `capacity.queueTimeoutSec` (30s) for a slot, then get 429 with `Retry-After`.
 
 ### Upgrade the deployment
 

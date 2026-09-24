@@ -176,9 +176,10 @@ FILE_TTL_SEC = int(os.environ.get("FILE_TTL_SEC") or 3600)
 # within EXECUTION_QUEUE_TIMEOUT_SEC gets 429 with Retry-After:
 # EXECUTION_RETRY_AFTER_SEC. When the executor backend itself has no room
 # (namespace ResourceQuota exhausted, pod unschedulable) the response is 503
-# with Retry-After: CAPACITY_RETRY_AFTER_SEC.
+# with Retry-After: CAPACITY_RETRY_AFTER_SEC. Keep the queue wait below the
+# client's request timeout (Onyx: timeout_ms/1000 + 10s).
 MAX_CONCURRENT_EXECUTIONS = max(1, int(os.environ.get("MAX_CONCURRENT_EXECUTIONS") or 16))
-EXECUTION_QUEUE_TIMEOUT_SEC = max(0.0, float(os.environ.get("EXECUTION_QUEUE_TIMEOUT_SEC") or 5.0))
+EXECUTION_QUEUE_TIMEOUT_SEC = max(0.0, float(os.environ.get("EXECUTION_QUEUE_TIMEOUT_SEC") or 30.0))
 EXECUTION_RETRY_AFTER_SEC = max(1, int(os.environ.get("EXECUTION_RETRY_AFTER_SEC") or 2))
 CAPACITY_RETRY_AFTER_SEC = max(1, int(os.environ.get("CAPACITY_RETRY_AFTER_SEC") or 10))
 # /health serves a cached backend check refreshed on this interval, so the
