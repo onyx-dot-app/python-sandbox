@@ -17,7 +17,11 @@ import pytest
 from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 
 from app.services.executor_base import StreamChunk, StreamEvent, StreamResult
-from app.services.executor_kubernetes import ExecutorPodSettings, KubernetesExecutor
+from app.services.executor_kubernetes import (
+    ExecutorPodSettings,
+    KubernetesExecutor,
+    kill_processes_command,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures & helpers
@@ -242,7 +246,7 @@ def test_streaming_timeout(executor: KubernetesExecutor) -> None:
     events = _run_streaming(
         executor,
         FakeExecResp(),
-        extra_stream_mocks=[MagicMock()],  # _kill_python_process
+        extra_stream_mocks=[FakeExecResp(stdout_chunks=["1\n"])],  # _kill_python_process
         timeout_ms=0,
     )
 
@@ -260,7 +264,7 @@ def test_streaming_timeout_calls_kill(executor: KubernetesExecutor) -> None:
         mock_stream.side_effect = [
             _make_tar_mock(),
             exec_resp,
-            MagicMock(),  # kill
+            FakeExecResp(stdout_chunks=["1\n"]),  # kill
             _make_snapshot_mock(),
         ]
         list(
@@ -275,7 +279,7 @@ def test_streaming_timeout_calls_kill(executor: KubernetesExecutor) -> None:
     kill_calls = [
         c
         for c in mock_stream.call_args_list
-        if c.kwargs.get("command") == ["pkill", "-9", "python"]
+        if c.kwargs.get("command") == kill_processes_command("comm", "python")
     ]
     assert len(kill_calls) == 1
 

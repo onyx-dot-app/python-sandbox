@@ -24,6 +24,7 @@ from app.services.executor_kubernetes import (
     ExecutorPodSettings,
     ExecutorPodStartError,
     KubernetesExecutor,
+    kill_processes_command,
 )
 
 PLATFORM_IDS = ExecutorPodSettings(run_as_user=None, run_as_group=None, fs_group=None)
@@ -289,3 +290,53 @@ def test_image_pull_policy_env_rejects_unknown(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("KUBERNETES_EXECUTOR_IMAGE_PULL_POLICY", "always")
     with pytest.raises(ValueError, match="must be one of"):
         app_configs._image_pull_policy_env("KUBERNETES_EXECUTOR_IMAGE_PULL_POLICY")
+
+
+# ---------------------------------------------------------------------------
+# Killing processes
+# ---------------------------------------------------------------------------
+
+
+def test_kill_processes_command_uses_python_not_pkill() -> None:
+    command = kill_processes_command("env", "CODE_INTERPRETER_EXEC_ID=abc")
+
+    assert command[:2] == ["python", "-c"]
+    assert command[3:] == ["env", "CODE_INTERPRETER_EXEC_ID=abc"]
+    compile(command[2], "<kill>", "exec")
+    assert "pkill" not in command[2]
+    assert "pid not in (me, 1)" in command[2]
+    assert 'split(b"\\0")' in command[2]
+
+
+def _exec_resp(stdout: str, exit_status: str) -> MagicMock:
+    resp = MagicMock()
+    resp.is_open.side_effect = [True, False]
+    resp.peek_stdout.side_effect = [True]
+    resp.read_stdout.return_value = stdout
+    resp.peek_stderr.return_value = False
+    resp.read_channel.return_value = exit_status
+    return resp
+
+
+def test_kill_processes_logs_count(
+    executor: KubernetesExecutor, caplog: pytest.LogCaptureFixture
+) -> None:
+    resp = _exec_resp("2\n", "{'status': 'Success'}")
+    with (
+        caplog.at_level("INFO"),
+        patch.object(executor, "_stream_pod_exec", return_value=resp) as exec_mock,
+    ):
+        executor._kill_processes_in_pod("session-abc", "comm", "bash")
+
+    assert exec_mock.call_args.kwargs["command"] == kill_processes_command("comm", "bash")
+    assert "Killed 2 process(es) (comm=bash) in pod session-abc" in caplog.text
+
+
+def test_kill_processes_warns_on_failure(
+    executor: KubernetesExecutor, caplog: pytest.LogCaptureFixture
+) -> None:
+    resp = _exec_resp("", "{'status': 'Failure', 'details': {'exitCode': 127}}")
+    with patch.object(executor, "_stream_pod_exec", return_value=resp):
+        executor._kill_processes_in_pod("session-abc", "comm", "bash")
+
+    assert "Failed to kill processes (comm=bash) in pod session-abc (exit_code=127" in caplog.text

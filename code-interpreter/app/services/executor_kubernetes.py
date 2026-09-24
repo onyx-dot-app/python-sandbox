@@ -11,7 +11,7 @@ from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from kubernetes import client, config, stream  # type: ignore
 from kubernetes.client import (  # type: ignore[import-untyped]
@@ -81,6 +81,58 @@ FATAL_CONTAINER_WAITING_REASONS: Final[frozenset[str]] = frozenset(
         "CreateContainerError",
     }
 )
+
+
+KILL_PROCESSES_TIMEOUT_MS: Final[int] = 10_000
+
+EXEC_ID_ENV_VAR: Final[str] = "CODE_INTERPRETER_EXEC_ID"
+
+KillMatch = Literal["comm", "env"]
+
+# The executor image has no pkill. Kills processes whose comm (argv[1] == "comm") or
+# one environment entry (argv[1] == "env") equals argv[2], and their descendants,
+# except this script and PID 1 (the container's sleep).
+_KILL_PROCESSES_SCRIPT: Final[str] = """
+import os, signal, sys
+kind, value, me = sys.argv[1], sys.argv[2], os.getpid()
+matched, parent = set(), {}
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    pid = int(entry)
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            parent[pid] = int(f.read().rsplit(")", 1)[1].split()[1])
+        if kind == "comm":
+            with open(f"/proc/{pid}/comm") as f:
+                hit = f.read().strip() == value
+        else:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                hit = value.encode() in f.read().split(b"\\0")
+    except (OSError, ValueError, IndexError):
+        continue
+    if hit and pid not in (me, 1):
+        matched.add(pid)
+targets = matched
+grew = True
+while grew:
+    children = {pid for pid, ppid in parent.items() if ppid in targets} - targets
+    targets |= children
+    grew = bool(children)
+killed = 0
+for pid in targets - {me}:
+    try:
+        os.kill(pid, signal.SIGKILL)
+        killed += 1
+    except OSError:
+        pass
+print(killed)
+"""
+
+
+def kill_processes_command(match: KillMatch, value: str) -> list[str]:
+    """Command that SIGKILLs matching processes and their descendants in an executor pod."""
+    return ["python", "-c", _KILL_PROCESSES_SCRIPT, match, value]
 
 
 class ExecutorPodStartError(RuntimeError):
@@ -563,25 +615,48 @@ class KubernetesExecutor(BaseExecutor):
                 f"stderr: {tar_stderr.decode('utf-8', errors='replace')}"
             )
 
-    def _kill_processes_in_pod(self, pod_name: str, process_name: str) -> None:
-        """Best-effort SIGKILL of all processes named ``process_name`` in the pod."""
+    def _kill_processes_in_pod(self, pod_name: str, match: KillMatch, value: str) -> None:
+        """Best-effort SIGKILL of matching processes and their descendants."""
         try:
-            self._stream_pod_exec(
+            resp = self._stream_pod_exec(
                 pod_name,
-                command=["pkill", "-9", process_name],
-                stderr=False,
+                command=kill_processes_command(match, value),
+                stderr=True,
                 stdin=False,
-                stdout=False,
+                stdout=True,
                 tty=False,
+            )
+            stdout, stderr, exit_code, timed_out = self._drain_exec_stream(
+                resp, KILL_PROCESSES_TIMEOUT_MS
             )
         except Exception:
             logger.warning(
-                "Failed to kill %s process in pod %s", process_name, pod_name, exc_info=True
+                "Failed to kill processes (%s=%s) in pod %s", match, value, pod_name, exc_info=True
             )
+            return
+
+        if timed_out or exit_code != 0:
+            logger.warning(
+                "Failed to kill processes (%s=%s) in pod %s (exit_code=%s, timed_out=%s): %s",
+                match,
+                value,
+                pod_name,
+                exit_code,
+                timed_out,
+                stderr.decode("utf-8", errors="replace").strip(),
+            )
+            return
+        logger.info(
+            "Killed %s process(es) (%s=%s) in pod %s",
+            stdout.decode("utf-8", errors="replace").strip(),
+            match,
+            value,
+            pod_name,
+        )
 
     def _kill_python_process(self, pod_name: str) -> None:
         """Kill the Python process running in the pod."""
-        self._kill_processes_in_pod(pod_name, "python")
+        self._kill_processes_in_pod(pod_name, "comm", "python")
 
     def _drain_exec_stream(
         self,
@@ -959,10 +1034,11 @@ class KubernetesExecutor(BaseExecutor):
                 raise SessionNotFoundError(session_id) from e
             raise
 
+        exec_marker = f"{EXEC_ID_ENV_VAR}={uuid.uuid4().hex}"
         start = time.perf_counter()
         exec_resp = self._stream_pod_exec(
             session_id,
-            command=["bash", "-c", cmd],
+            command=["env", exec_marker, "bash", "-c", cmd],
             stderr=True,
             stdin=False,
             stdout=True,
@@ -974,7 +1050,7 @@ class KubernetesExecutor(BaseExecutor):
         )
 
         if timed_out:
-            self._kill_processes_in_pod(session_id, "bash")
+            self._kill_processes_in_pod(session_id, "env", exec_marker)
 
         duration_ms = int((time.perf_counter() - start) * 1000)
         return ExecutionResult(

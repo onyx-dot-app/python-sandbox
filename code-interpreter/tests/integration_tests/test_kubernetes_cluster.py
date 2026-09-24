@@ -123,3 +123,25 @@ def test_net_admin_lockdown(executor: KubernetesExecutor) -> None:
         assert excinfo.value.status == 403
         return
     assert "egress-blocked" in _run(executor)
+
+
+def test_session_bash_timeout_kills_command(executor: KubernetesExecutor) -> None:
+    session = executor.create_session(ttl_seconds=120)
+    try:
+        result = executor.execute_bash_in_session(
+            session.session_id, cmd="sleep 31337", timeout_ms=2_000, max_output_bytes=10_000
+        )
+        assert result.timed_out is True
+
+        # The bracket keeps this command's own cmdline from matching.
+        check = executor.execute_bash_in_session(
+            session.session_id,
+            cmd='for p in /proc/[0-9]*; do tr "\\0" " " < "$p/cmdline"; echo; done '
+            '| grep -c "sleep 3133[7]" || true',
+            timeout_ms=10_000,
+            max_output_bytes=10_000,
+        )
+        assert check.exit_code == 0, check.stderr
+        assert check.stdout.strip() == "0"
+    finally:
+        executor.delete_session(session.session_id)
