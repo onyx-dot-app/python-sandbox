@@ -11,6 +11,8 @@ from typing import Any, Final
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+from app.kubernetes_pod_config import parse_pod_resources
+
 CHART: Final[Path] = Path(__file__).resolve().parents[3] / "kubernetes" / "code-interpreter"
 NOTES_PROBE: Final[str] = 'notes: {{ include "code-interpreter.notes" . | toJson }}\n'
 LEGACY_MEMORY_LIMIT: Final[str] = "codeInterpreter.kubernetesExecutor.podResources.limits.memory"
@@ -47,6 +49,16 @@ def test_default_executor_resources(tmp_path: Path) -> None:
         "requests": {"cpu": "100m", "memory": "64Mi"},
     }
     assert "WARNING" not in notes
+
+
+def test_null_resource_is_rendered_as_null(tmp_path: Path) -> None:
+    env, _ = _render(tmp_path, "codeInterpreter.kubernetesExecutor.podResources.limits.cpu=null")
+    raw = env["KUBERNETES_EXECUTOR_POD_RESOURCES"]
+    assert json.loads(raw) == {
+        "limits": {"cpu": None},
+        "requests": {"cpu": "100m", "memory": "64Mi"},
+    }
+    assert parse_pod_resources("X", raw).limits == {"cpu": None}
 
 
 def test_legacy_memory_limit_is_dropped_with_a_warning(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from decimal import Decimal
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, cast
 
 from kubernetes.utils import parse_quantity  # type: ignore[import-untyped]
 from pydantic import (
@@ -60,12 +60,8 @@ def _quantity(value: object) -> str:
     return text
 
 
-def _empty_to_none(value: object) -> object:
-    return None if value == "" else value
-
-
 Quantity = Annotated[str, BeforeValidator(_quantity)]
-ObjectName = Annotated[str | None, BeforeValidator(_empty_to_none)]
+ObjectName = Annotated[str | None, BeforeValidator(lambda v: None if v == "" else v)]
 
 
 class _Strict(BaseModel):
@@ -184,18 +180,13 @@ class ExecutorPodResources(_Strict):
             request = self.requests.get(name)
             if limit is None or request is None:
                 continue
-            if _parse(request) > _parse(limit):
+            if parse_quantity(request) > parse_quantity(limit):
                 raise ValueError(f"requests.{name} ({request}) exceeds limits.{name} ({limit})")
         return self
 
 
-def _parse(quantity: str) -> Decimal:
-    value: Decimal = parse_quantity(quantity)
-    return value
-
-
 def quantity_to_mebibytes(quantity: str) -> Decimal:
-    return _parse(quantity) / (1024 * 1024)
+    return cast(Decimal, parse_quantity(quantity)) / (1024 * 1024)
 
 
 def _error_text(error: ValidationError) -> str:
@@ -222,14 +213,25 @@ def parse_pod_overrides(name: str, raw: str | None) -> ExecutorPodOverrides:
         raise ValueError(f"{name} is invalid: {_error_text(e)}") from e
 
 
+def _with_default_resources(value: Any) -> Any:  # noqa: ANN401
+    """Merge ``value`` over the default requests and limits, per key. A null key removes one."""
+    if not isinstance(value, dict):
+        return value
+    merged = dict(value)
+    for section, defaults in (
+        ("requests", DEFAULT_RESOURCE_REQUESTS),
+        ("limits", DEFAULT_RESOURCE_LIMITS),
+    ):
+        override = value.get(section, {})
+        merged[section] = {**defaults, **override} if isinstance(override, dict) else override
+    return merged
+
+
 def parse_pod_resources(name: str, raw: str | None) -> ExecutorPodResources:
-    """Parse the JSON resources in env var ``name``. Unset or empty means the defaults."""
-    if raw is None or not raw.strip():
-        return ExecutorPodResources.model_validate(
-            {"requests": DEFAULT_RESOURCE_REQUESTS, "limits": DEFAULT_RESOURCE_LIMITS}
-        )
+    """Parse the JSON resources in env var ``name`` over the defaults. Unset means the defaults."""
+    value: Any = {} if raw is None or not raw.strip() else _load_json(name, raw)
     try:
-        return ExecutorPodResources.model_validate(_load_json(name, raw))
+        return ExecutorPodResources.model_validate(_with_default_resources(value))
     except ValidationError as e:
         raise ValueError(f"{name} is invalid: {_error_text(e)}") from e
 

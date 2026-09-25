@@ -280,7 +280,9 @@ resources:
 ```
 
 - `KUBERNETES_EXECUTOR_POD_RESOURCES` is JSON with `requests` (cpu, memory,
-  ephemeral-storage) and `limits` (cpu, ephemeral-storage). Unset gives the values above.
+  ephemeral-storage) and `limits` (cpu, ephemeral-storage). It is merged over the values
+  above, one key at a time: a key you omit keeps its default, and `null` removes one.
+  For example, `{"requests": {"cpu": "250m"}}` keeps the CPU limit of 5.
 - The CPU limit default of 5 keeps the limit that earlier versions derived from
   `CPU_TIME_LIMIT_SEC`. Lower it (for example to `1`) to pack pods densely.
 - The memory limit always comes from `MEMORY_LIMIT_MB`, the same setting that the Docker

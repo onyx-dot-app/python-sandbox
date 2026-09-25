@@ -101,12 +101,21 @@ Reject value combinations that cannot work.
 
 {{/*
 Execution pod resources as JSON. limits.memory is dropped: the memory limit is codeInterpreter.memoryLimitMb.
+Helm deletes keys set to null, so a removed service default is sent as an explicit null.
 */}}
 {{- define "code-interpreter.executorPodResources" -}}
 {{- $resources := deepCopy (.Values.codeInterpreter.kubernetesExecutor.podResources | default dict) -}}
-{{- if $resources.limits -}}
-{{- $_ := unset $resources.limits "memory" -}}
+{{- $limits := $resources.limits | default dict -}}
+{{- $_ := unset $limits "memory" -}}
+{{- $requests := $resources.requests | default dict -}}
+{{- range $key := list "cpu" -}}
+{{- if not (hasKey $limits $key) -}}{{- $_ := set $limits $key nil -}}{{- end -}}
 {{- end -}}
+{{- range $key := list "cpu" "memory" -}}
+{{- if not (hasKey $requests $key) -}}{{- $_ := set $requests $key nil -}}{{- end -}}
+{{- end -}}
+{{- $_ := set $resources "limits" $limits -}}
+{{- $_ := set $resources "requests" $requests -}}
 {{- $resources | toJson -}}
 {{- end }}
 

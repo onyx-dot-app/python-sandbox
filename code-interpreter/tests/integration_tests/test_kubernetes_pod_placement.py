@@ -261,13 +261,15 @@ def test_memory_request_is_capped_at_memory_limit(executor: KubernetesExecutor) 
     resources = parse_pod_resources("X", '{"requests": {"memory": "1Gi"}}')
     container = _manifest(_with(executor, resources=resources), memory_limit_mb=256)
     assert container.spec.containers[0].resources == {
-        "requests": {"memory": "256Mi"},
-        "limits": {"memory": "256Mi"},
+        "requests": {"cpu": "100m", "memory": "256Mi"},
+        "limits": {"cpu": "5", "memory": "256Mi"},
     }
 
 
 def test_no_memory_limit_without_memory_limit_mb(executor: KubernetesExecutor) -> None:
-    resources = parse_pod_resources("X", "{}")
+    resources = parse_pod_resources(
+        "X", '{"requests": {"cpu": null, "memory": null}, "limits": {"cpu": null}}'
+    )
     assert (
         _manifest(_with(executor, resources=resources), memory_limit_mb=None)
         .spec.containers[0]
@@ -277,8 +279,31 @@ def test_no_memory_limit_without_memory_limit_mb(executor: KubernetesExecutor) -
 
 
 def test_null_resource_removes_a_default() -> None:
-    resources = parse_pod_resources("X", '{"requests": {"cpu": "100m"}, "limits": {"cpu": null}}')
-    assert executor_container_resources(resources, None) == {"requests": {"cpu": "100m"}}
+    resources = parse_pod_resources("X", '{"limits": {"cpu": null}}')
+    assert executor_container_resources(resources, None) == {
+        "requests": {"cpu": "100m", "memory": "64Mi"}
+    }
+
+
+def test_partial_requests_keep_the_default_cpu_limit() -> None:
+    resources = parse_pod_resources("X", '{"requests": {"cpu": "250m"}}')
+    assert executor_container_resources(resources, None) == {
+        "requests": {"cpu": "250m", "memory": "64Mi"},
+        "limits": {"cpu": "5"},
+    }
+
+
+def test_partial_limits_keep_the_default_requests() -> None:
+    resources = parse_pod_resources("X", '{"limits": {"ephemeral-storage": "1Gi"}}')
+    assert executor_container_resources(resources, None) == {
+        "requests": {"cpu": "100m", "memory": "64Mi"},
+        "limits": {"cpu": "5", "ephemeral-storage": "1Gi"},
+    }
+
+
+def test_merged_request_is_checked_against_the_default_limit() -> None:
+    with pytest.raises(ValueError, match="exceeds limits.cpu"):
+        parse_pod_resources("X", '{"requests": {"cpu": "6"}}')
 
 
 @pytest.mark.parametrize(
