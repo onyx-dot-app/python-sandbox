@@ -16,6 +16,7 @@ from kubernetes.client import (  # type: ignore[import-untyped]
     V1Pod,
     V1PodStatus,
 )
+from pydantic import ValidationError
 
 from app import app_configs
 from app.image_ref import default_image_pull_policy
@@ -233,6 +234,53 @@ def test_wait_times_out_on_monotonic_deadline(executor: KubernetesExecutor) -> N
     with pytest.raises(ExecutorPodStartError, match="did not become ready in 1 seconds"):
         executor._wait_for_pod_ready("code-exec-abc")
     assert 1 <= time.monotonic() - start < 2
+
+
+def test_wait_retries_create_container_error_until_deadline(
+    executor: KubernetesExecutor,
+) -> None:
+    executor.v1.read_namespaced_pod.return_value = _pod(
+        "Pending", waiting_reason="CreateContainerError"
+    )
+    executor.pod_settings = ExecutorPodSettings(ready_timeout_sec=1)
+
+    start = time.monotonic()
+    with pytest.raises(
+        ExecutorPodStartError,
+        match="last waiting reason: CreateContainerError: CreateContainerError detail",
+    ):
+        executor._wait_for_pod_ready("code-exec-abc")
+    assert 1 <= time.monotonic() - start < 2
+    assert executor.v1.read_namespaced_pod.call_count > 1
+
+
+def test_wait_recovers_from_transient_create_container_error(
+    executor: KubernetesExecutor,
+) -> None:
+    executor.v1.read_namespaced_pod.side_effect = [
+        _pod("Pending", waiting_reason="CreateContainerError"),
+        _pod("Running"),
+    ]
+    executor._wait_for_pod_ready("code-exec-abc")
+    assert executor.v1.read_namespaced_pod.call_count == 2
+
+
+def test_timeout_without_waiting_reason_omits_it(executor: KubernetesExecutor) -> None:
+    executor.v1.read_namespaced_pod.return_value = _pod(
+        "Pending", waiting_reason="ContainerCreating"
+    )
+    executor.pod_settings = ExecutorPodSettings(ready_timeout_sec=1)
+    with pytest.raises(ExecutorPodStartError) as exc_info:
+        executor._wait_for_pod_ready("code-exec-abc")
+    assert "last waiting reason" not in str(exc_info.value)
+
+
+def test_pod_settings_is_frozen_and_rejects_unknown_fields() -> None:
+    settings = ExecutorPodSettings()
+    with pytest.raises(ValidationError):
+        settings.ready_timeout_sec = 5
+    with pytest.raises(ValidationError):
+        ExecutorPodSettings(ready_timout_sec=5)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------

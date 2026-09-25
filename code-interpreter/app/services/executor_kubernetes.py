@@ -23,6 +23,7 @@ from kubernetes.client import (  # type: ignore[import-untyped]
 )
 from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 from kubernetes.stream import ws_client  # type: ignore[import-untyped]
+from pydantic import BaseModel, ConfigDict
 
 from app.app_configs import (
     DEFAULT_EXECUTOR_ID,
@@ -77,8 +78,8 @@ FATAL_CONTAINER_WAITING_REASONS: Final[frozenset[str]] = frozenset(
         "ImagePullBackOff",
         "ErrImageNeverPull",
         "InvalidImageName",
+        # Executor pods mount no Secrets or ConfigMaps, so this is a permanent spec conflict.
         "CreateContainerConfigError",
-        "CreateContainerError",
     }
 )
 
@@ -139,9 +140,10 @@ class ExecutorPodStartError(RuntimeError):
     """An executor pod failed to reach Running."""
 
 
-@dataclass(frozen=True, slots=True)
-class ExecutorPodSettings:
+class ExecutorPodSettings(BaseModel):
     """Pod-level settings for executor pods. ``None`` IDs are left to the platform."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     ready_timeout_sec: int = 30
     image_pull_policy: str | None = None
@@ -180,6 +182,21 @@ def _pod_start_failure(pod: V1Pod) -> str | None:
                 f"container {container_status.name} is {waiting.reason}: "
                 f"{waiting.message or 'no message'}"
             )
+    return None
+
+
+def _container_waiting_detail(pod: V1Pod) -> str | None:
+    """Return the first non-routine container waiting reason and message, if any."""
+    status = pod.status
+    if status is None:
+        return None
+    for container_status in [
+        *(status.init_container_statuses or []),
+        *(status.container_statuses or []),
+    ]:
+        waiting = container_status.state.waiting if container_status.state else None
+        if waiting is not None and waiting.reason and waiting.reason != "ContainerCreating":
+            return f"{waiting.reason}: {waiting.message or 'no message'}"
     return None
 
 
@@ -516,6 +533,7 @@ class KubernetesExecutor(BaseExecutor):
         logger.info(f"Waiting up to {timeout_sec}s for pod {pod_name} to be ready")
         deadline = time.monotonic() + timeout_sec
         phase: str | None = None
+        last_waiting: str | None = None
         while True:
             pod = self.v1.read_namespaced_pod(pod_name, self.namespace)
             phase = pod.status.phase if pod.status else None
@@ -523,6 +541,7 @@ class KubernetesExecutor(BaseExecutor):
                 logger.info(f"Pod {pod_name} is running")
                 return
             failure = _pod_start_failure(pod)
+            last_waiting = _container_waiting_detail(pod) or last_waiting
             if failure is not None:
                 raise ExecutorPodStartError(
                     f"Executor pod {pod_name} (image {self.image}) cannot start: {failure}"
@@ -530,10 +549,11 @@ class KubernetesExecutor(BaseExecutor):
             if time.monotonic() >= deadline:
                 break
             time.sleep(POD_READY_POLL_INTERVAL_SECONDS)
+        waiting_note = f", last waiting reason: {last_waiting}" if last_waiting else ""
         raise ExecutorPodStartError(
             f"Executor pod {pod_name} did not become ready in {timeout_sec} seconds "
-            f"(phase={phase}); raise KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC if image pulls "
-            "or scheduling are slow"
+            f"(phase={phase}{waiting_note}); raise KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC "
+            "if image pulls or scheduling are slow"
         )
 
     def _execute_pod_deadline_seconds(self, timeout_ms: int) -> int:
