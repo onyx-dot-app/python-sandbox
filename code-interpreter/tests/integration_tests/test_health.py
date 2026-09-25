@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import re
 import subprocess
-from collections.abc import Generator
+import threading
+import time
+from collections.abc import Callable, Generator
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import SERVICE_VERSION, create_app
+from app.main import (
+    SERVICE_VERSION,
+    BackendHealthMonitor,
+    checker_stale_after_sec,
+    create_app,
+    network_isolation_mode,
+)
 from app.services.executor_base import HealthCheck
 from app.services.executor_docker import DockerExecutor
 from app.services.executor_factory import get_executor
@@ -36,18 +44,179 @@ def test_health_returns_ok_when_backend_healthy() -> None:
     assert body["version"] == SERVICE_VERSION
 
 
-def test_health_returns_error_when_backend_unhealthy() -> None:
+def test_ready_returns_503_and_health_reports_error_when_backend_unhealthy() -> None:
     unhealthy = HealthCheck(status="error", message="daemon down")
 
     with patch.object(DockerExecutor, "check_health", return_value=unhealthy):
         client = TestClient(create_app())
-        response = client.get("/health")
+        ready = client.get("/ready")
+        health = client.get("/health")
 
-    assert response.status_code == 200
-    body = response.json()
+    assert ready.status_code == 503
+    assert ready.json()["status"] == "error"
+    assert ready.json()["message"] == "daemon down"
+
+    # /health stays 200 for the liveness probe but reports the cached result.
+    assert health.status_code == 200
+    body = health.json()
     assert body["status"] == "error"
     assert body["message"] == "daemon down"
     assert body["version"] == SERVICE_VERSION
+
+
+def test_ready_returns_200_when_backend_healthy() -> None:
+    with patch.object(DockerExecutor, "check_health", return_value=HealthCheck(status="ok")):
+        client = TestClient(create_app())
+        response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_ready_times_out_slow_backend_check() -> None:
+    def _slow_check(self: DockerExecutor) -> HealthCheck:
+        time.sleep(1.0)
+        return HealthCheck(status="ok")
+
+    with (
+        patch("app.main.BACKEND_CHECK_TIMEOUT_SEC", 0.1),
+        patch.object(DockerExecutor, "check_health", _slow_check),
+    ):
+        client = TestClient(create_app())
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert "timed out" in response.json()["message"]
+
+
+def _health_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name.startswith("backend-health")]
+
+
+def _wait_until(predicate: Callable[[], bool], timeout_sec: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_sec
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not met in time"
+        time.sleep(0.01)
+
+
+def test_hung_backend_check_is_single_flight_and_bounded() -> None:
+    release = threading.Event()
+    calls = 0
+
+    def _hung_check(self: DockerExecutor) -> HealthCheck:
+        nonlocal calls
+        calls += 1
+        release.wait()
+        return HealthCheck(status="ok")
+
+    try:
+        with (
+            patch("app.main.BACKEND_CHECK_TIMEOUT_SEC", 0.05),
+            patch.object(DockerExecutor, "check_health", _hung_check),
+        ):
+            client = TestClient(create_app())
+            baseline = threading.active_count()
+            for _ in range(10):
+                start = time.monotonic()
+                response = client.get("/ready")
+                assert time.monotonic() - start < 1
+                assert response.status_code == 503
+                assert "in progress" in response.json()["message"]
+                assert len(_health_threads()) <= 2
+                assert threading.active_count() <= baseline + 2
+            assert calls == 1
+    finally:
+        release.set()
+
+
+def test_health_stays_200_while_checks_fail() -> None:
+    unhealthy = HealthCheck(status="error", message="kubernetes API down")
+    with patch.object(DockerExecutor, "check_health", return_value=unhealthy):
+        app = create_app()
+        client = TestClient(app)
+        monitor: BackendHealthMonitor = app.state.backend_monitor
+        for _ in range(3):
+            monitor.last_completed_at -= checker_stale_after_sec()
+            assert client.get("/ready").status_code == 503
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert health.json()["message"] == "kubernetes API down"
+
+
+def test_health_flips_to_503_when_checker_is_wedged_and_recovers() -> None:
+    release = threading.Event()
+
+    def _hung_check(self: DockerExecutor) -> HealthCheck:
+        release.wait()
+        return HealthCheck(status="ok")
+
+    try:
+        with (
+            patch("app.main.BACKEND_CHECK_TIMEOUT_SEC", 0.05),
+            patch.object(DockerExecutor, "check_health", _hung_check),
+        ):
+            app = create_app()
+            client = TestClient(app)
+            monitor: BackendHealthMonitor = app.state.backend_monitor
+            assert client.get("/ready").status_code == 503
+            assert client.get("/health").status_code == 200
+
+            monitor.last_completed_at = time.monotonic() - checker_stale_after_sec() - 1
+            wedged = client.get("/health")
+            assert wedged.status_code == 503
+            assert "stuck" in wedged.json()["message"]
+
+            release.set()
+            _wait_until(lambda: not monitor.is_wedged())
+            assert client.get("/health").status_code == 200
+            assert client.get("/ready").status_code == 200
+    finally:
+        release.set()
+
+
+def test_checker_staleness_window_covers_three_intervals() -> None:
+    with (
+        patch("app.main.HEALTH_CHECK_INTERVAL_SEC", 30),
+        patch("app.main.BACKEND_CHECK_TIMEOUT_SEC", 2.5),
+    ):
+        assert checker_stale_after_sec() == 92.5
+
+
+def test_health_never_calls_executor_backend() -> None:
+    """Liveness must not wait on the Docker daemon or the Kubernetes API."""
+    with (
+        patch("app.main.get_executor") as get_executor_mock,
+        patch.object(DockerExecutor, "check_health") as check_mock,
+    ):
+        client = TestClient(create_app())
+        for _ in range(3):
+            assert client.get("/health").status_code == 200
+
+    get_executor_mock.assert_not_called()
+    check_mock.assert_not_called()
+
+
+def test_health_reports_backend_and_network_isolation() -> None:
+    client = TestClient(create_app())
+    body = client.get("/health").json()
+    assert body["executor_backend"] == "docker"
+    assert body["network_isolation"].startswith("docker_network:")
+
+
+@pytest.mark.parametrize(
+    ("net_admin", "expected"),
+    [
+        (True, "net_admin_init_container+network_policy"),
+        (False, "network_policy_only"),
+    ],
+)
+def test_network_isolation_mode_for_kubernetes(net_admin: bool, expected: str) -> None:
+    with (
+        patch("app.main.EXECUTOR_BACKEND", "kubernetes"),
+        patch("app.main.KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN", net_admin),
+    ):
+        assert network_isolation_mode() == expected
 
 
 def test_health_version_matches_package_metadata() -> None:

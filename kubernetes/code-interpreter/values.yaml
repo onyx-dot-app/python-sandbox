@@ -210,7 +210,12 @@ secret:
   data: {}
     # API_KEY: "base64-encoded-value"
 
-# Health check probes
+# Health check probes. /health (liveness) answers from memory and never calls
+# the Kubernetes API, so a saturated or slow API server cannot get the pod
+# restarted mid-run. It returns 503 only when the backend checker is stuck (no
+# check completed in about 92s by default). /ready (readiness) runs a fresh
+# executor backend check and returns 503 when the service cannot create
+# executor pods.
 livenessProbe:
   httpGet:
     path: /health
@@ -222,7 +227,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /health
+    path: /ready
     port: http
   initialDelaySeconds: 5
   periodSeconds: 5
@@ -261,3 +266,69 @@ extraEnvFrom: []
 #     name: my-configmap
 # - secretRef:
 #     name: my-secret
+
+# Admission control. Each replica runs at most maxConcurrentExecutions
+# executions at once (execute, execute/stream, session create, session bash).
+# A request that cannot get a slot within queueTimeoutSec gets HTTP 429 with a
+# Retry-After header. See HOW_IT_WORKS.md, "Capacity and overload".
+capacity:
+  maxConcurrentExecutions: 16
+  # Keep below the client's request timeout (Onyx: timeout_ms/1000 + 10s,
+  # 70s by default). Queued requests hold no worker thread while they wait.
+  queueTimeoutSec: 30
+  # Retry-After (seconds) sent with 429 (this replica is busy).
+  retryAfterSec: 2
+  # Retry-After (seconds) sent with 503 (executor quota exhausted or executor
+  # pod unschedulable).
+  capacityRetryAfterSec: 10
+
+# Optional ResourceQuota (and LimitRange) for the executor namespace. When the
+# quota is exhausted, pod creation fails and the API returns HTTP 503 with
+# Retry-After instead of a generic 500.
+#
+# The quota counts every pod in its namespace, and a cpu/memory quota rejects
+# any pod there that does not set those requests/limits. Use a dedicated
+# codeInterpreter.kubernetesExecutor.namespace. Rendering fails when the quota
+# would land in the release namespace unless allowReleaseNamespace is true.
+executorResourceQuota:
+  enabled: false
+  allowReleaseNamespace: false
+  hard:
+    pods: "32"
+    requests.cpu: "4"
+    requests.memory: 4Gi
+    limits.memory: 12Gi
+    # Executor pods set no ephemeral-storage requests or limits. A quota on
+    # these keys rejects every such pod unless executorResourceQuota.limitRange
+    # gives containers defaults.
+    # requests.ephemeral-storage: 8Gi
+    # limits.ephemeral-storage: 16Gi
+  # Optional quota scopes, for example [NotBestEffort].
+  scopes: []
+  limitRange:
+    enabled: false
+    defaultRequest:
+      ephemeral-storage: 64Mi
+    default:
+      ephemeral-storage: 256Mi
+
+# Prometheus metrics are always served at /metrics on the http port.
+metrics:
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs (monitoring.coreos.com/v1).
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels, for example the label your Prometheus selects on.
+    labels: {}
+
+# Uploaded files and execution outputs are stored on the local disk of the
+# replica that received them (FILE_STORAGE_DIR). The Onyx client uploads a file
+# and then runs code in a separate request, so with more than one replica a
+# run can land on a replica that does not have the file and fail with 404.
+#
+# The chart refuses to render replicaCount > 1 unless shared is true. Set it
+# only after you mount shared storage (ReadWriteMany) at FILE_STORAGE_DIR on
+# every replica, or route each client to one replica (sticky sessions).
+fileStorage:
+  shared: false

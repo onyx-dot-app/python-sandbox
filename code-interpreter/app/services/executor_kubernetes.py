@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import math
 import tarfile
@@ -26,6 +27,7 @@ from kubernetes.stream import ws_client  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict
 
 from app.app_configs import (
+    BACKEND_CHECK_TIMEOUT_SEC,
     DEFAULT_EXECUTOR_ID,
     KUBERNETES_EXECUTOR_FS_GROUP,
     KUBERNETES_EXECUTOR_IMAGE,
@@ -59,14 +61,17 @@ from app.services.executor_base import (
     SESSION_EXPIRES_AT_KEY,
     SESSION_NAME_PREFIX,
     BaseExecutor,
+    CapacityReason,
     EntryKind,
     ExecutionResult,
+    ExecutorCapacityError,
     HealthCheck,
     SessionInfo,
     SessionNotFoundError,
     StreamChunk,
     StreamEvent,
     StreamResult,
+    StreamStarted,
     WorkspaceEntry,
     wrap_last_line_interactive,
 )
@@ -80,6 +85,11 @@ POD_DELETE_CONFIRM_TIMEOUT_SECONDS = 2.0
 SESSION_LABEL_SELECTOR = f"app={SESSION_APP_LABEL},component={SESSION_COMPONENT_LABEL}"
 
 POD_READY_POLL_INTERVAL_SECONDS: Final[float] = 0.2
+# (connect, read) timeout for API calls on the health path, so a hung API server ends the call.
+HEALTH_REQUEST_TIMEOUT: Final[tuple[float, float]] = (
+    BACKEND_CHECK_TIMEOUT_SEC,
+    BACKEND_CHECK_TIMEOUT_SEC,
+)
 # Covers file staging, the workspace snapshot and cleanup after the user timeout.
 EXECUTE_POD_DEADLINE_MARGIN_SECONDS: Final[int] = 120
 
@@ -267,6 +277,67 @@ def _parse_exit_code(error: str) -> int | None:
     return None
 
 
+def _api_exception_message(e: ApiException) -> str:
+    body = e.body.decode("utf-8", errors="replace") if isinstance(e.body, bytes) else e.body
+    if isinstance(body, str):
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            return body
+        if isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
+            return str(parsed["message"])
+        return body
+    return str(e.reason or "")
+
+
+def capacity_error_from_api_exception(e: ApiException) -> ExecutorCapacityError | None:
+    """Map a pod-create rejection caused by an exhausted ResourceQuota.
+
+    Other 403s (missing RBAC, "must specify limits" on a quota'd namespace) are
+    configuration errors, not transient capacity, and are left alone.
+    """
+    if e.status != 403:
+        return None
+    message = _api_exception_message(e)
+    if "exceeded quota" not in message:
+        return None
+    return ExecutorCapacityError(message, reason=CapacityReason.QUOTA_EXCEEDED)
+
+
+def pod_unschedulable_error(pod: V1Pod) -> ExecutorCapacityError | None:
+    """Return a capacity error if the scheduler has marked ``pod`` Unschedulable.
+
+    Intended for the pod-ready wait loop: raise the result instead of waiting
+    out the full timeout, so the API can answer 503 with the scheduler's reason.
+    """
+    status = pod.status
+    if status is None or status.phase != "Pending":
+        return None
+    for condition in status.conditions or []:
+        if (
+            condition.type == "PodScheduled"
+            and condition.status == "False"
+            and condition.reason == "Unschedulable"
+        ):
+            return ExecutorCapacityError(
+                f"Executor pod cannot be scheduled: {condition.message or 'no reason given'}",
+                reason=CapacityReason.UNSCHEDULABLE,
+            )
+    return None
+
+
+@contextmanager
+def _map_capacity_errors() -> Generator[None, None, None]:
+    try:
+        yield
+    except ApiException as e:
+        capacity_error = capacity_error_from_api_exception(e)
+        if capacity_error is None:
+            raise
+        logger.warning("Executor capacity unavailable: %s", capacity_error)
+        raise capacity_error from e
+
+
 @dataclass
 class _KubeExecContext:
     """Holds the live pod and exec stream for the duration of an execution."""
@@ -322,6 +393,7 @@ class KubernetesExecutor(BaseExecutor):
             ).read_namespaced_deployment(
                 name=KUBERNETES_OWNER_DEPLOYMENT_NAME,
                 namespace=KUBERNETES_OWN_NAMESPACE,
+                _request_timeout=HEALTH_REQUEST_TIMEOUT,
             )
         except Exception as e:
             # Catch every error, not only ApiException. This runs in __init__,
@@ -362,7 +434,8 @@ class KubernetesExecutor(BaseExecutor):
                             resource="pods",
                         )
                     )
-                )
+                ),
+                _request_timeout=HEALTH_REQUEST_TIMEOUT,
             )
             if not review.status.allowed:
                 reason = review.status.reason or "no reason provided"
@@ -587,13 +660,17 @@ class KubernetesExecutor(BaseExecutor):
         """Wait for a pod to reach Running, failing fast when it never can.
 
         Raises ExecutorPodStartError on an image pull failure, a container that
-        cannot be created, a terminal pod phase, or the ready timeout.
+        cannot be created, a terminal pod phase, or the ready timeout. Raises
+        ExecutorCapacityError (UNSCHEDULABLE) if the pod is still unschedulable at
+        the deadline. The scheduler marks a pod Unschedulable as soon as no node
+        fits, before a cluster autoscaler can add one, so that is not fatal early.
         """
         timeout_sec = self.pod_settings.ready_timeout_sec
         logger.info(f"Waiting up to {timeout_sec}s for pod {pod_name} to be ready")
         deadline = time.monotonic() + timeout_sec
         phase: str | None = None
         last_waiting: str | None = None
+        unschedulable: ExecutorCapacityError | None = None
         while True:
             pod = self.v1.read_namespaced_pod(pod_name, self.namespace)
             phase = pod.status.phase if pod.status else None
@@ -606,9 +683,15 @@ class KubernetesExecutor(BaseExecutor):
                 raise ExecutorPodStartError(
                     f"Executor pod {pod_name} (image {self.image}) cannot start: {failure}"
                 )
+            unschedulable = pod_unschedulable_error(pod)
             if time.monotonic() >= deadline:
                 break
             time.sleep(POD_READY_POLL_INTERVAL_SECONDS)
+        if unschedulable is not None:
+            logger.warning(
+                "Pod %s still unschedulable after %ss: %s", pod_name, timeout_sec, unschedulable
+            )
+            raise unschedulable
         waiting_note = f", last waiting reason: {last_waiting}" if last_waiting else ""
         raise ExecutorPodStartError(
             f"Executor pod {pod_name} did not become ready in {timeout_sec} seconds "
@@ -1016,7 +1099,8 @@ class KubernetesExecutor(BaseExecutor):
             self.namespace,
             ttl_seconds,
         )
-        self.v1.create_namespaced_pod(namespace=self.namespace, body=manifest)
+        with _map_capacity_errors():
+            self.v1.create_namespaced_pod(namespace=self.namespace, body=manifest)
 
         try:
             self._wait_for_pod_ready(pod_name)
@@ -1157,13 +1241,16 @@ class KubernetesExecutor(BaseExecutor):
             last_line_interactive: If True, the last line will print its value to stdout
                                    if it's a bare expression (only the last line is affected).
         """
-        with self._run_in_pod(
-            code=code,
-            timeout_ms=timeout_ms,
-            memory_limit_mb=memory_limit_mb,
-            files=files,
-            last_line_interactive=last_line_interactive,
-        ) as ctx:
+        with (
+            _map_capacity_errors(),
+            self._run_in_pod(
+                code=code,
+                timeout_ms=timeout_ms,
+                memory_limit_mb=memory_limit_mb,
+                files=files,
+                last_line_interactive=last_line_interactive,
+            ) as ctx,
+        ):
             if stdin:
                 logger.debug("Writing stdin to Python process")
                 ctx.exec_resp.write_stdin(stdin)
@@ -1216,13 +1303,17 @@ class KubernetesExecutor(BaseExecutor):
         Yields StreamChunk events during execution, then a single StreamResult
         at the end containing exit_code, timing, and workspace files.
         """
-        with self._run_in_pod(
-            code=code,
-            timeout_ms=timeout_ms,
-            memory_limit_mb=memory_limit_mb,
-            files=files,
-            last_line_interactive=last_line_interactive,
-        ) as ctx:
+        with (
+            _map_capacity_errors(),
+            self._run_in_pod(
+                code=code,
+                timeout_ms=timeout_ms,
+                memory_limit_mb=memory_limit_mb,
+                files=files,
+                last_line_interactive=last_line_interactive,
+            ) as ctx,
+        ):
+            yield StreamStarted()
             if stdin:
                 logger.debug("Writing stdin to Python process")
                 ctx.exec_resp.write_stdin(stdin)

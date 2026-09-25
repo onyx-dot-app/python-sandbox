@@ -101,6 +101,15 @@ spec:
             - name: KUBERNETES_OWNER_DEPLOYMENT_NAME
               value: {{ include "code-interpreter.fullname" . | quote }}
             {{- end }}
+            # Admission control
+            - name: MAX_CONCURRENT_EXECUTIONS
+              value: {{ .Values.capacity.maxConcurrentExecutions | quote }}
+            - name: EXECUTION_QUEUE_TIMEOUT_SEC
+              value: {{ .Values.capacity.queueTimeoutSec | quote }}
+            - name: EXECUTION_RETRY_AFTER_SEC
+              value: {{ .Values.capacity.retryAfterSec | quote }}
+            - name: CAPACITY_RETRY_AFTER_SEC
+              value: {{ .Values.capacity.capacityRetryAfterSec | quote }}
             {{- with .Values.extraEnvVars }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

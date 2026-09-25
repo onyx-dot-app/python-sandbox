@@ -17,6 +17,7 @@ This document provides an in-depth explanation of the code-interpreter service a
   - [Attack Surface Mitigation](#attack-surface-mitigation)
 - [Last-Line Interactive Mode](#last-line-interactive-mode)
 - [File Management](#file-management)
+- [Capacity and Overload](#capacity-and-overload)
 
 ## Overview
 
@@ -782,6 +783,87 @@ Content-Type: multipart/form-data
 - Size limits prevent disk exhaustion
 - TTL prevents unbounded storage growth
 - Files isolated per request (no cross-request access)
+
+## Capacity and Overload
+
+### Admission control
+
+Each API replica admits at most `MAX_CONCURRENT_EXECUTIONS` executions at a time
+(default 16). Executions are `/v1/execute`, `/v1/execute/stream`, `POST /v1/sessions`,
+and `POST /v1/sessions/{id}/bash`. A session holds a slot only while its pod is created,
+not for its whole TTL.
+
+The execution routes are `async`. They get a slot on the event loop, then run the
+blocking executor call in the worker thread pool. A request that waits longer than
+`EXECUTION_QUEUE_TIMEOUT_SEC` (default 30s) for a slot is rejected with 429. The wait
+is an async poll on the event loop, so a queued request holds no worker thread. Keep the
+wait below the client's request timeout (Onyx: `timeout_ms/1000 + 10`s). The thread pool is
+sized at startup to at least `MAX_CONCURRENT_EXECUTIONS + 24`, so admitted executions
+never queue behind each other for a thread.
+
+Why 16: it stays below the default thread pool of 40 with room for file routes and
+stream reads. It also bounds the API replica's memory for buffered output and files, and
+the executor resources one replica can request (16 x 256Mi memory limit).
+
+### Overload contract
+
+| Status | Reason | Meaning | `Retry-After` |
+|--------|--------|---------|---------------|
+| 429 | `concurrency_limit` | This replica is at `MAX_CONCURRENT_EXECUTIONS`. The cluster can still have room. | `EXECUTION_RETRY_AFTER_SEC` (2s) |
+| 503 | `quota_exceeded` | Pod creation failed because the executor namespace ResourceQuota is exhausted. | `CAPACITY_RETRY_AFTER_SEC` (10s) |
+| 503 | `unschedulable` | The executor pod is still Unschedulable at `KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC` (for example, insufficient CPU). | `CAPACITY_RETRY_AFTER_SEC` (10s) |
+
+429 is about one replica, so a retry can succeed at once on another replica. 503 is
+about the executor backend as a whole, so clients should back off longer. Both use the
+normal error body, `{"detail": "..."}`. Other 403 errors on pod creation (missing RBAC,
+a quota that needs limits the pod does not set) are configuration errors. They stay
+500 because a retry cannot fix them.
+
+The scheduler marks a pod Unschedulable as soon as no node fits, before a cluster
+autoscaler can add one. So the service keeps waiting until the ready timeout, and
+returns 503 only if the pod is still Unschedulable then. Image pull and container
+creation failures take precedence: they fail at once as a start error (500), because a
+retry cannot fix them.
+
+`/v1/execute/stream` returns 422, 429 and 503 before the event stream opens. The
+executor emits an internal "started" event once the sandbox runs, and the route waits
+for it before it sends the response headers. Errors after that point arrive as an SSE
+`error` event, as before.
+
+### Health and readiness
+
+- `/health` (liveness) is `async` and answers from memory. It never calls the Docker
+  daemon or the Kubernetes API, so a saturated thread pool or a slow API server cannot
+  fail the liveness probe and restart a replica with runs in flight. Its `status` field
+  shows the last backend check, which a background task refreshes every
+  `HEALTH_CHECK_INTERVAL_SEC` (default 30s).
+- `/health` returns 503 only when the checker itself is stuck: no check has completed,
+  with any result, in 3 × `HEALTH_CHECK_INTERVAL_SEC` + `BACKEND_CHECK_TIMEOUT_SEC`
+  (default 92.5s). A failed check counts as completed, so a Docker or Kubernetes API
+  outage keeps liveness at 200 and readiness at 503.
+- `/ready` (readiness) runs a fresh backend check, bounded by `BACKEND_CHECK_TIMEOUT_SEC`
+  (default 2.5s), and returns 503 when it fails or times out.
+- Backend checks are single-flight: while one runs, `/ready` and the background task
+  wait on it instead of starting another. They run on a dedicated pool of two threads,
+  so a hung check cannot starve the request thread pool, the session reaper or the
+  image watchdog. Kubernetes API calls on the health path have a (connect, read)
+  timeout of `BACKEND_CHECK_TIMEOUT_SEC`, so the thread itself ends.
+- Both report `executor_backend` and `network_isolation`
+  (`net_admin_init_container+network_policy`, `network_policy_only`, or
+  `docker_network:<name>`).
+
+### Metrics
+
+`/metrics` exposes Prometheus metrics: active executions and the configured limit,
+rejections by status and reason, completions by outcome (`ok`, `timed_out`, `error`),
+admission wait time, and execution duration. A run whose user code exits non-zero
+counts as `ok`: the sandbox worked.
+
+### File storage with replicas
+
+File storage is local to each replica. Uploads and runs are separate requests, so more
+than one replica needs shared storage at `FILE_STORAGE_DIR` or sticky routing. The Helm
+chart refuses to render `replicaCount > 1` without `fileStorage.shared=true`.
 
 ## Summary
 

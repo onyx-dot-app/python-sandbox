@@ -95,7 +95,29 @@ class StreamResult:
     files: tuple[WorkspaceEntry, ...]
 
 
-StreamEvent = StreamChunk | StreamResult
+@dataclass(frozen=True, slots=True)
+class StreamStarted:
+    """Emitted once the sandbox is running, before any output.
+
+    Errors raised before this event (capacity, validation) are setup errors
+    that the API can still report as an HTTP status.
+    """
+
+
+StreamEvent = StreamStarted | StreamChunk | StreamResult
+
+
+class CapacityReason(StrEnum):
+    QUOTA_EXCEEDED = "quota_exceeded"
+    UNSCHEDULABLE = "unschedulable"
+
+
+class ExecutorCapacityError(RuntimeError):
+    """The backend has no room for another sandbox right now; retry later."""
+
+    def __init__(self, message: str, *, reason: CapacityReason) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)

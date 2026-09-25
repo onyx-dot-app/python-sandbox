@@ -16,11 +16,17 @@ import os
 import time
 from collections.abc import Generator
 from typing import Final
+from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
+from kubernetes import client  # type: ignore[import-untyped]
 from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 
+from app.app_configs import CAPACITY_RETRY_AFTER_SEC
 from app.kubernetes_pod_config import ExecutorPodOverrides, parse_pod_overrides
+from app.main import create_app
+from app.services.executor_base import CapacityReason, ExecutorCapacityError
 from app.services.executor_kubernetes import (
     ExecutorPodSettings,
     ExecutorPodStartError,
@@ -217,5 +223,63 @@ def test_pod_without_toleration_stays_pending(
     executor.pod_settings = ExecutorPodSettings(
         image_pull_policy=PULL_POLICY, ready_timeout_sec=5, overrides=_placement(tolerate=False)
     )
-    with pytest.raises(ExecutorPodStartError, match="phase=Pending"):
+    with pytest.raises(ExecutorCapacityError) as excinfo:
         _run(executor)
+    assert excinfo.value.reason is CapacityReason.UNSCHEDULABLE
+
+
+EXECUTE_BODY: Final[dict[str, object]] = {"code": "print(1)", "timeout_ms": 10_000}
+
+
+def _post_execute(executor: KubernetesExecutor, path: str) -> tuple[int, dict[str, str], str]:
+    with patch("app.services.executor_factory.get_executor", return_value=executor):
+        http = TestClient(create_app())
+        response = http.post(path, json=EXECUTE_BODY)
+        return response.status_code, dict(response.headers), response.text
+
+
+@pytest.mark.parametrize("path", ["/v1/execute", "/v1/execute/stream"])
+def test_unschedulable_pod_returns_503(executor: KubernetesExecutor, path: str) -> None:
+    executor.pod_settings = ExecutorPodSettings(
+        image_pull_policy=PULL_POLICY,
+        ready_timeout_sec=3,
+        overrides=parse_pod_overrides(
+            "overrides", json.dumps({"nodeSelector": {PLACEMENT_KEY: "no-such-node"}})
+        ),
+    )
+    status, headers, body = _post_execute(executor, path)
+    assert status == 503, body
+    assert headers["retry-after"] == str(CAPACITY_RETRY_AFTER_SEC)
+    assert "unschedulable" in json.loads(body)["detail"]
+
+
+@pytest.fixture()
+def exhausted_quota(executor: KubernetesExecutor) -> Generator[None, None, None]:
+    name = "code-interpreter-test-exhausted"
+    executor.v1.create_namespaced_resource_quota(
+        NAMESPACE,
+        client.V1ResourceQuota(
+            metadata=client.V1ObjectMeta(name=name),
+            spec=client.V1ResourceQuotaSpec(hard={"pods": "0"}),
+        ),
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            quota = executor.v1.read_namespaced_resource_quota(name, NAMESPACE)
+            if quota.status and quota.status.hard:
+                break
+            time.sleep(0.2)
+        yield
+    finally:
+        executor.v1.delete_namespaced_resource_quota(name, NAMESPACE)
+
+
+@pytest.mark.parametrize("path", ["/v1/execute", "/v1/execute/stream"])
+def test_exhausted_quota_returns_503(
+    executor: KubernetesExecutor, exhausted_quota: None, path: str
+) -> None:
+    status, headers, body = _post_execute(executor, path)
+    assert status == 503, body
+    assert headers["retry-after"] == str(CAPACITY_RETRY_AFTER_SEC)
+    assert "quota_exceeded" in json.loads(body)["detail"]

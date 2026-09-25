@@ -127,6 +127,17 @@ class HealthResponse(BaseModel):
             "required minimum to detect whether new functionality is available."
         ),
     )
+    executor_backend: StrictStr | None = Field(
+        None, description="Configured executor backend: 'docker' or 'kubernetes'."
+    )
+    network_isolation: StrictStr | None = Field(
+        None,
+        description=(
+            "How sandboxes are cut off from the network: "
+            "'net_admin_init_container+network_policy', 'network_policy_only', "
+            "or 'docker_network:<name>'."
+        ),
+    )
 
 
 DEFAULT_SESSION_TTL_SEC = 15 * 60

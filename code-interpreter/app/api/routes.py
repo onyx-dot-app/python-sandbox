@@ -1,12 +1,32 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import itertools
+import weakref
+from collections.abc import Generator, Iterator
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict, SkipValidation
 
-from app.app_configs import get_settings
+from app.app_configs import (
+    CAPACITY_RETRY_AFTER_SEC,
+    EXECUTION_RETRY_AFTER_SEC,
+    get_settings,
+)
+from app.metrics import (
+    EXECUTIONS_COMPLETED,
+    EXECUTIONS_REJECTED,
+    OPERATION_EXECUTE,
+    OPERATION_EXECUTE_STREAM,
+    OPERATION_SESSION_BASH,
+    OPERATION_SESSION_CREATE,
+    OUTCOME_ERROR,
+    OUTCOME_OK,
+    OUTCOME_TIMED_OUT,
+    REJECT_REASON_CONCURRENCY_LIMIT,
+)
 from app.models.schemas import (
     BashExecRequest,
     BashExecResponse,
@@ -23,10 +43,13 @@ from app.models.schemas import (
     UploadFileResponse,
     WorkspaceFile,
 )
+from app.services.admission import ExecutionLimiter, ExecutionSlot
 from app.services.executor_base import (
     EntryKind,
+    ExecutorCapacityError,
     SessionNotFoundError,
     StreamChunk,
+    StreamEvent,
     StreamResult,
     WorkspaceEntry,
 )
@@ -109,10 +132,40 @@ def _save_workspace_files(
     return workspace_files
 
 
-@router.post("/execute", response_model=ExecuteResponse, status_code=status.HTTP_200_OK)
-def execute(req: ExecuteRequest) -> ExecuteResponse:
-    """Execute provided Python code synchronously within an isolated Docker container."""
-    _validate_timeout(req)
+def _too_many_requests(operation: str) -> HTTPException:
+    EXECUTIONS_REJECTED.labels(operation, "429", REJECT_REASON_CONCURRENCY_LIMIT).inc()
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=(
+            "Execution capacity on this replica is saturated. Retry after the Retry-After delay."
+        ),
+        headers={"Retry-After": str(EXECUTION_RETRY_AFTER_SEC)},
+    )
+
+
+def _capacity_unavailable(operation: str, exc: ExecutorCapacityError) -> HTTPException:
+    EXECUTIONS_REJECTED.labels(operation, "503", exc.reason.value).inc()
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=f"Executor capacity unavailable ({exc.reason.value}): {exc}",
+        headers={"Retry-After": str(CAPACITY_RETRY_AFTER_SEC)},
+    )
+
+
+async def _admit(request: Request, operation: str) -> ExecutionSlot:
+    limiter: ExecutionLimiter = request.app.state.execution_limiter
+    slot = await limiter.acquire(operation)
+    if slot is None:
+        raise _too_many_requests(operation)
+    return slot
+
+
+def _record_outcome(operation: str, *, timed_out: bool) -> None:
+    outcome = OUTCOME_TIMED_OUT if timed_out else OUTCOME_OK
+    EXECUTIONS_COMPLETED.labels(operation, outcome).inc()
+
+
+def _run_execute(req: ExecuteRequest) -> ExecuteResponse:
     settings = get_settings()
     storage = get_file_storage()
     staged_files, input_files_map = _stage_request_files(req, storage)
@@ -133,6 +186,8 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
+    except ExecutorCapacityError as exc:
+        raise _capacity_unavailable(OPERATION_EXECUTE, exc) from exc
 
     return ExecuteResponse(
         stdout=result.stdout,
@@ -144,42 +199,121 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
     )
 
 
-@router.post("/execute/stream")
-def execute_stream(req: ExecuteRequest) -> StreamingResponse:
-    """Execute Python code with streaming output via Server-Sent Events."""
+@router.post("/execute", response_model=ExecuteResponse, status_code=status.HTTP_200_OK)
+async def execute(req: ExecuteRequest, request: Request) -> ExecuteResponse:
+    """Execute provided Python code synchronously within an isolated sandbox.
+
+    Returns 429 when this replica is at MAX_CONCURRENT_EXECUTIONS and 503 when
+    the executor backend has no capacity; both carry a Retry-After header.
+    """
     _validate_timeout(req)
+    slot = await _admit(request, OPERATION_EXECUTE)
+    try:
+        response = await run_in_threadpool(_run_execute, req)
+    except HTTPException:
+        raise
+    except Exception:
+        EXECUTIONS_COMPLETED.labels(OPERATION_EXECUTE, OUTCOME_ERROR).inc()
+        raise
+    finally:
+        slot.release()
+    _record_outcome(OPERATION_EXECUTE, timed_out=response.timed_out)
+    return response
+
+
+class _StartedStream(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    # SkipValidation keeps pydantic from wrapping the live generator in a validator.
+    events: SkipValidation[Generator[StreamEvent, None, None] | None]
+    first_event: SkipValidation[StreamEvent | None]
+    input_files_map: dict[str, bytes]
+    setup_error: SkipValidation[Exception | None] = None
+
+
+def _start_stream(req: ExecuteRequest) -> _StartedStream:
+    """Stage files and run the executor until the sandbox has started.
+
+    Setup errors raised here become real HTTP statuses. Any other error is
+    reported as an SSE error event, as before.
+    """
     settings = get_settings()
+    staged_files, input_files_map = _stage_request_files(req, get_file_storage())
+    events: Generator[StreamEvent, None, None] | None = None
+    try:
+        events = execute_python_streaming(
+            code=req.code,
+            stdin=req.stdin,
+            timeout_ms=req.timeout_ms,
+            max_output_bytes=settings.max_output_bytes,
+            cpu_time_limit_sec=settings.cpu_time_limit_sec,
+            memory_limit_mb=settings.memory_limit_mb,
+            files=staged_files,
+            last_line_interactive=req.last_line_interactive,
+        )
+        first_event = next(events, None)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    except ExecutorCapacityError as exc:
+        raise _capacity_unavailable(OPERATION_EXECUTE_STREAM, exc) from exc
+    except Exception as exc:
+        return _StartedStream(
+            events=events, first_event=None, input_files_map=input_files_map, setup_error=exc
+        )
+    return _StartedStream(events=events, first_event=first_event, input_files_map=input_files_map)
+
+
+def _sse_frames(started: _StartedStream, slot: ExecutionSlot) -> Iterator[str]:
     storage = get_file_storage()
-    staged_files, input_files_map = _stage_request_files(req, storage)
+    pending = [started.first_event] if started.first_event is not None else []
+    try:
+        if started.setup_error is not None:
+            raise started.setup_error
+        for event in itertools.chain(pending, started.events or ()):
+            if isinstance(event, StreamChunk):
+                yield StreamOutputEvent(stream=event.stream, data=event.data).to_sse()
+            elif isinstance(event, StreamResult):
+                _record_outcome(OPERATION_EXECUTE_STREAM, timed_out=event.timed_out)
+                yield StreamResultEvent(
+                    exit_code=event.exit_code,
+                    timed_out=event.timed_out,
+                    duration_ms=event.duration_ms,
+                    files=_save_workspace_files(event.files, started.input_files_map, storage),
+                ).to_sse()
+    except Exception as exc:
+        EXECUTIONS_COMPLETED.labels(OPERATION_EXECUTE_STREAM, OUTCOME_ERROR).inc()
+        yield StreamErrorEvent(message=str(exc)).to_sse()
+    finally:
+        if started.events is not None:
+            started.events.close()
+        slot.release()
 
-    def generate() -> Iterator[str]:
-        try:
-            for event in execute_python_streaming(
-                code=req.code,
-                stdin=req.stdin,
-                timeout_ms=req.timeout_ms,
-                max_output_bytes=settings.max_output_bytes,
-                cpu_time_limit_sec=settings.cpu_time_limit_sec,
-                memory_limit_mb=settings.memory_limit_mb,
-                files=staged_files,
-                last_line_interactive=req.last_line_interactive,
-            ):
-                if isinstance(event, StreamChunk):
-                    yield StreamOutputEvent(stream=event.stream, data=event.data).to_sse()
 
-                elif isinstance(event, StreamResult):
-                    yield StreamResultEvent(
-                        exit_code=event.exit_code,
-                        timed_out=event.timed_out,
-                        duration_ms=event.duration_ms,
-                        files=_save_workspace_files(event.files, input_files_map, storage),
-                    ).to_sse()
+@router.post("/execute/stream")
+async def execute_stream(req: ExecuteRequest, request: Request) -> StreamingResponse:
+    """Execute Python code with streaming output via Server-Sent Events.
 
-        except Exception as exc:
-            yield StreamErrorEvent(message=str(exc)).to_sse()
+    Admission (429) and backend capacity (503) errors are returned as HTTP
+    statuses before the stream opens. Errors after the sandbox starts arrive
+    as an SSE ``error`` event.
+    """
+    _validate_timeout(req)
+    slot = await _admit(request, OPERATION_EXECUTE_STREAM)
+    try:
+        started = await run_in_threadpool(_start_stream, req)
+    except BaseException:
+        slot.release()
+        raise
 
+    frames = _sse_frames(started, slot)
+    # A generator that never starts never runs its finally block, e.g. when
+    # the client disconnects before the first body chunk.
+    weakref.finalize(frames, slot.release)
     return StreamingResponse(
-        generate(),
+        frames,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -272,17 +406,7 @@ def delete_file(file_id: str) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post(
-    "/sessions",
-    response_model=CreateSessionResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
-    """Create a long-lived code-executor pod with the given TTL.
-
-    The pod is guaranteed to be torn down at or before the TTL expires, even
-    if the API service crashes and restarts.
-    """
+def _run_create_session(req: CreateSessionRequest) -> CreateSessionResponse:
     settings = get_settings()
     storage = get_file_storage()
     staged_files, _ = _resolve_uploaded_files(req.files, storage)
@@ -304,11 +428,39 @@ def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
+    except ExecutorCapacityError as exc:
+        raise _capacity_unavailable(OPERATION_SESSION_CREATE, exc) from exc
 
     return CreateSessionResponse(
         session_id=info.session_id,
         expires_at=info.expires_at,
     )
+
+
+@router.post(
+    "/sessions",
+    response_model=CreateSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_session(req: CreateSessionRequest, request: Request) -> CreateSessionResponse:
+    """Create a long-lived code-executor pod with the given TTL.
+
+    The pod is guaranteed to be torn down at or before the TTL expires, even
+    if the API service crashes and restarts. The admission slot covers pod
+    creation only, not the session lifetime.
+    """
+    slot = await _admit(request, OPERATION_SESSION_CREATE)
+    try:
+        response = await run_in_threadpool(_run_create_session, req)
+    except HTTPException:
+        raise
+    except Exception:
+        EXECUTIONS_COMPLETED.labels(OPERATION_SESSION_CREATE, OUTCOME_ERROR).inc()
+        raise
+    finally:
+        slot.release()
+    _record_outcome(OPERATION_SESSION_CREATE, timed_out=False)
+    return response
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -331,24 +483,8 @@ def delete_session(session_id: str) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post(
-    "/sessions/{session_id}/bash",
-    response_model=BashExecResponse,
-    status_code=status.HTTP_200_OK,
-)
-def session_exec_bash(session_id: str, req: BashExecRequest) -> BashExecResponse:
-    """Run a bash command inside an existing session.
-
-    The session pod has no network access (enforced at session creation), and
-    that restriction continues to apply for every command run via this route.
-    """
+def _run_session_bash(session_id: str, req: BashExecRequest) -> BashExecResponse:
     settings = get_settings()
-    if req.timeout_ms > settings.max_exec_timeout_ms:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"timeout_ms exceeds maximum of {settings.max_exec_timeout_ms} ms",
-        )
-
     try:
         result = get_executor().execute_bash_in_session(
             session_id,
@@ -374,3 +510,37 @@ def session_exec_bash(session_id: str, req: BashExecRequest) -> BashExecResponse
         timed_out=result.timed_out,
         duration_ms=result.duration_ms,
     )
+
+
+@router.post(
+    "/sessions/{session_id}/bash",
+    response_model=BashExecResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def session_exec_bash(
+    session_id: str, req: BashExecRequest, request: Request
+) -> BashExecResponse:
+    """Run a bash command inside an existing session.
+
+    The session pod has no network access (enforced at session creation), and
+    that restriction continues to apply for every command run via this route.
+    """
+    settings = get_settings()
+    if req.timeout_ms > settings.max_exec_timeout_ms:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"timeout_ms exceeds maximum of {settings.max_exec_timeout_ms} ms",
+        )
+
+    slot = await _admit(request, OPERATION_SESSION_BASH)
+    try:
+        response = await run_in_threadpool(_run_session_bash, session_id, req)
+    except HTTPException:
+        raise
+    except Exception:
+        EXECUTIONS_COMPLETED.labels(OPERATION_SESSION_BASH, OUTCOME_ERROR).inc()
+        raise
+    finally:
+        slot.release()
+    _record_outcome(OPERATION_SESSION_BASH, timed_out=response.timed_out)
+    return response
