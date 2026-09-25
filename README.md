@@ -150,7 +150,7 @@ Configure the service via environment variables:
 - `HOST`: Server host (default: `0.0.0.0`)
 - `PORT`: Server port (default: `8000`)
 - `MAX_EXEC_TIMEOUT_MS`: Maximum execution timeout in milliseconds (default: `10000`)
-- `CPU_TIME_LIMIT_SEC`: CPU time limit per execution (default: `5`)
+- `CPU_TIME_LIMIT_SEC`: CPU time limit per execution, Docker backend only (default: `5`)
 - `MEMORY_LIMIT_MB`: Memory limit per execution (default: `128`)
 - `MAX_OUTPUT_BYTES`: Maximum output size (default: `1048576` = 1MB)
 - `MAX_FILE_SIZE_MB`: Maximum file upload size (default: `10`)

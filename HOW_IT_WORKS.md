@@ -272,12 +272,26 @@ securityContext:
 ```yaml
 resources:
   limits:
-    memory: "256Mi"     # Configurable via MEMORY_LIMIT_MB
-    cpu: "5"            # Configurable via CPU_TIME_LIMIT_SEC
+    memory: "256Mi"     # MEMORY_LIMIT_MB
+    cpu: "5"            # KUBERNETES_EXECUTOR_POD_RESOURCES
   requests:
-    memory: "64Mi"      # Request 25% of limit
-    cpu: "100m"         # Request minimal CPU
+    memory: "64Mi"      # KUBERNETES_EXECUTOR_POD_RESOURCES, capped at the memory limit
+    cpu: "100m"         # KUBERNETES_EXECUTOR_POD_RESOURCES
 ```
+
+- `KUBERNETES_EXECUTOR_POD_RESOURCES` is JSON with `requests` (cpu, memory,
+  ephemeral-storage) and `limits` (cpu, ephemeral-storage). It is merged over the values
+  above, one key at a time: a key you omit keeps its default, and `null` removes one.
+  For example, `{"requests": {"cpu": "250m"}}` keeps the CPU limit of 5.
+- The CPU limit default of 5 keeps the limit that earlier versions derived from
+  `CPU_TIME_LIMIT_SEC`. Lower it (for example to `1`) to pack pods densely.
+- The memory limit always comes from `MEMORY_LIMIT_MB`, the same setting that the Docker
+  backend uses. The configuration cannot set it, so one setting controls it.
+- `CPU_TIME_LIMIT_SEC` does not apply to executor pods. The execution timeout
+  (`timeout_ms`, at most `MAX_EXEC_TIMEOUT_MS`) bounds their run time.
+- With a read-only root filesystem, user code can write only to the two emptyDirs, and
+  their size limits bound that. An `ephemeral-storage` limit is useful when
+  `KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM=false`, or for scheduler accounting.
 
 **File System Layout:**
 
@@ -285,9 +299,9 @@ resources:
 Pod Filesystem:
 
 /               (read-only container filesystem)
-├── tmp/        (emptyDir, 64Mi limit)
+├── tmp/        (emptyDir, 64Mi limit: KUBERNETES_EXECUTOR_TMP_SIZE_LIMIT)
 │   └── matplotlib/
-├── workspace/  (emptyDir, 100Mi limit, uid:gid 65532:65532)
+├── workspace/  (emptyDir, 100Mi limit: KUBERNETES_EXECUTOR_WORKSPACE_SIZE_LIMIT)
 │   ├── __main__.py
 │   └── <user-files>
 └── opt/
@@ -307,6 +321,38 @@ Pod Filesystem:
 6. Timeout via client-side timer (kill Python process with `pkill -9` on timeout)
 7. Extract files via `kubectl exec tar -c`
 8. Delete Pod with `grace_period_seconds=0`
+
+**Dedicated Sandbox Node Pools:**
+
+Executor pods run untrusted code. To keep them apart from the service and from other
+workloads, run them on a dedicated node pool. Taint the pool so that other pods do not
+schedule there, then give executor pods a matching node selector and toleration.
+`KUBERNETES_EXECUTOR_POD_OVERRIDES` is JSON with `nodeSelector`, `tolerations`,
+`affinity`, `topologySpreadConstraints`, `priorityClassName`, `runtimeClassName`,
+`labels` and `annotations`. The chart sets it from `kubernetesExecutor.pod`:
+
+```yaml
+# kubectl label node <node> onyx.app/pool=sandbox
+# kubectl taint node <node> onyx.app/sandbox=true:NoSchedule
+codeInterpreter:
+  kubernetesExecutor:
+    pod:
+      nodeSelector:
+        onyx.app/pool: sandbox
+      tolerations:
+        - key: onyx.app/sandbox
+          operator: Exists
+          effect: NoSchedule
+      # Optional: a sandboxed runtime installed on the pool.
+      runtimeClassName: gvisor
+```
+
+- The service validates the JSON at startup and does not start if it is not valid.
+- The labels `app` and `component`, the `code-interpreter.expires-at` annotation and the
+  ownerReference belong to the service. The configuration cannot set them.
+- A pod that no node can take stays Pending. The request fails after
+  `KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC` with `phase=Pending`. With a cluster
+  autoscaler, set that timeout above the node start time of the pool.
 
 **Kubernetes-Specific Security:**
 
@@ -444,12 +490,12 @@ resources:
 ```yaml
 resources:
   limits:
-    cpu: "5"
+    cpu: "5"  # KUBERNETES_EXECUTOR_POD_RESOURCES
 ```
 
 - Throttling applied via CFS (Completely Fair Scheduler)
-- Less strict than Docker ulimit (throttling, not killing)
-- Recommendation: Combine with client-side timeout
+- Limits CPU rate, not CPU time. `CPU_TIME_LIMIT_SEC` does not apply
+- The execution timeout stops the process
 
 #### Timeout Enforcement
 

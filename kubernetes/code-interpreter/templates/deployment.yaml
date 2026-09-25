@@ -79,6 +79,14 @@ spec:
             - name: KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM
               value: {{ .readOnlyRootFilesystem | quote }}
             {{- end }}
+            - name: KUBERNETES_EXECUTOR_POD_RESOURCES
+              value: {{ include "code-interpreter.executorPodResources" . | quote }}
+            - name: KUBERNETES_EXECUTOR_WORKSPACE_SIZE_LIMIT
+              value: {{ .Values.codeInterpreter.kubernetesExecutor.workspaceSizeLimit | quote }}
+            - name: KUBERNETES_EXECUTOR_TMP_SIZE_LIMIT
+              value: {{ .Values.codeInterpreter.kubernetesExecutor.tmpSizeLimit | quote }}
+            - name: KUBERNETES_EXECUTOR_POD_OVERRIDES
+              value: {{ .Values.codeInterpreter.kubernetesExecutor.pod | toJson | quote }}
             {{- if .Values.codeInterpreter.kubernetesExecutor.serviceAccount }}
             - name: KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
               value: {{ .Values.codeInterpreter.kubernetesExecutor.serviceAccount | quote }}

@@ -4,18 +4,23 @@ Opt-in: set KUBERNETES_EXECUTOR_TEST_NAMESPACE to a namespace in the current
 kubeconfig context. The executor image must be pullable, or already on the
 nodes with KUBERNETES_EXECUTOR_TEST_PULL_POLICY=IfNotPresent (e.g. kind).
 Label the namespace pod-security.kubernetes.io/enforce=restricted to check
-restricted Pod Security admission.
+restricted Pod Security admission. Set KUBERNETES_EXECUTOR_TEST_PLACEMENT_NODE to a
+node name to run the placement tests, which label and taint that node for the
+duration of the test.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from collections.abc import Generator
 from typing import Final
 
 import pytest
 from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 
+from app.kubernetes_pod_config import ExecutorPodOverrides, parse_pod_overrides
 from app.services.executor_kubernetes import (
     ExecutorPodSettings,
     ExecutorPodStartError,
@@ -25,6 +30,8 @@ from app.services.executor_kubernetes import (
 NAMESPACE: Final[str] = os.environ.get("KUBERNETES_EXECUTOR_TEST_NAMESPACE") or ""
 PULL_POLICY: Final[str | None] = os.environ.get("KUBERNETES_EXECUTOR_TEST_PULL_POLICY") or None
 PSS_ENFORCE_LABEL: Final[str] = "pod-security.kubernetes.io/enforce"
+PLACEMENT_NODE: Final[str] = os.environ.get("KUBERNETES_EXECUTOR_TEST_PLACEMENT_NODE") or ""
+PLACEMENT_KEY: Final[str] = "code-interpreter-test/sandbox"
 
 pytestmark = pytest.mark.skipif(
     not NAMESPACE, reason="set KUBERNETES_EXECUTOR_TEST_NAMESPACE to run cluster tests"
@@ -145,3 +152,70 @@ def test_session_bash_timeout_kills_command(executor: KubernetesExecutor) -> Non
         assert check.stdout.strip() == "0"
     finally:
         executor.delete_session(session.session_id)
+
+
+@pytest.fixture()
+def sandbox_node(executor: KubernetesExecutor) -> Generator[str, None, None]:
+    """Label and taint PLACEMENT_NODE as a dedicated sandbox node, then restore it."""
+    if not PLACEMENT_NODE:
+        pytest.skip("set KUBERNETES_EXECUTOR_TEST_PLACEMENT_NODE to run placement tests")
+    v1 = executor.v1
+    taints = v1.read_node(PLACEMENT_NODE).spec.taints or []
+    sandbox_taint = {"key": PLACEMENT_KEY, "value": "true", "effect": "NoSchedule"}
+    v1.patch_node(
+        PLACEMENT_NODE,
+        {
+            "metadata": {"labels": {PLACEMENT_KEY: "true"}},
+            "spec": {"taints": [*taints, sandbox_taint]},
+        },
+    )
+    try:
+        yield PLACEMENT_NODE
+    finally:
+        current = v1.read_node(PLACEMENT_NODE).spec.taints or []
+        v1.patch_node(
+            PLACEMENT_NODE,
+            {
+                "metadata": {"labels": {PLACEMENT_KEY: None}},
+                "spec": {"taints": [t for t in current if t.key != PLACEMENT_KEY] or None},
+            },
+        )
+
+
+def _placement(*, tolerate: bool) -> ExecutorPodOverrides:
+    tolerations = [{"key": PLACEMENT_KEY, "operator": "Exists", "effect": "NoSchedule"}]
+    return parse_pod_overrides(
+        "overrides",
+        json.dumps(
+            {
+                "nodeSelector": {PLACEMENT_KEY: "true"},
+                "tolerations": tolerations if tolerate else [],
+            }
+        ),
+    )
+
+
+def test_pod_runs_on_tainted_sandbox_node(executor: KubernetesExecutor, sandbox_node: str) -> None:
+    executor.pod_settings = ExecutorPodSettings(
+        image_pull_policy=PULL_POLICY, overrides=_placement(tolerate=True)
+    )
+    nodes: list[str] = []
+    wait = executor._wait_for_pod_ready
+
+    def wait_and_record(pod_name: str) -> None:
+        wait(pod_name)
+        nodes.append(executor.v1.read_namespaced_pod(pod_name, NAMESPACE).spec.node_name)
+
+    executor._wait_for_pod_ready = wait_and_record  # type: ignore[method-assign]
+    _run(executor)
+    assert nodes == [sandbox_node]
+
+
+def test_pod_without_toleration_stays_pending(
+    executor: KubernetesExecutor, sandbox_node: str
+) -> None:
+    executor.pod_settings = ExecutorPodSettings(
+        image_pull_policy=PULL_POLICY, ready_timeout_sec=5, overrides=_placement(tolerate=False)
+    )
+    with pytest.raises(ExecutorPodStartError, match="phase=Pending"):
+        _run(executor)

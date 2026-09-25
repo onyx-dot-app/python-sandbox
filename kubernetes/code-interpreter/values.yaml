@@ -155,14 +155,37 @@ codeInterpreter:
       fsGroup: 65532
       # User code can write only to /workspace and /tmp when this is true.
       readOnlyRootFilesystem: true
-    # Resource limits for execution pods
+    # Requests and limits of the execution container. Supported: cpu, memory
+    # (requests only) and ephemeral-storage. The memory limit is
+    # codeInterpreter.memoryLimitMb, and a larger memory request is capped at it.
+    # codeInterpreter.cpuTimeLimitSec does not affect execution pods. Set a value
+    # to null to remove a default, e.g. limits.cpu: null for no CPU limit.
+    # The CPU limit default of 5 keeps the limit that earlier versions derived
+    # from cpuTimeLimitSec. Lower it (e.g. to "1") to pack pods densely.
     podResources:
       limits:
-        cpu: "1"
-        memory: "256Mi"
+        cpu: "5"
       requests:
         cpu: "100m"
         memory: "64Mi"
+    # Size limits of the /workspace and /tmp emptyDir volumes of execution pods.
+    # Kubelet evicts a pod that writes more than the limit.
+    workspaceSizeLimit: 100Mi
+    tmpSizeLimit: 64Mi
+    # Scheduling and metadata of execution pods. Use these to run user code on a
+    # dedicated node pool, apart from the service and other workloads. The labels
+    # "app" and "component" and the ownerReference belong to the service and
+    # cannot be set here.
+    pod:
+      nodeSelector: {}
+      tolerations: []
+      affinity: {}
+      topologySpreadConstraints: []
+      priorityClassName: ""
+      # For example "gvisor" or "kata", to run user code in a sandboxed runtime.
+      runtimeClassName: ""
+      labels: {}
+      annotations: {}
 
 # RBAC configuration
 rbac:
