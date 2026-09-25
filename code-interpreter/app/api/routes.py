@@ -3,12 +3,12 @@ from __future__ import annotations
 import itertools
 import weakref
 from collections.abc import Generator, Iterator
-from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict, SkipValidation
 
 from app.app_configs import (
     CAPACITY_RETRY_AFTER_SEC,
@@ -221,12 +221,14 @@ async def execute(req: ExecuteRequest, request: Request) -> ExecuteResponse:
     return response
 
 
-@dataclass
-class _StartedStream:
-    events: Generator[StreamEvent, None, None] | None
-    first_event: StreamEvent | None
+class _StartedStream(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    # SkipValidation keeps pydantic from wrapping the live generator in a validator.
+    events: SkipValidation[Generator[StreamEvent, None, None] | None]
+    first_event: SkipValidation[StreamEvent | None]
     input_files_map: dict[str, bytes]
-    setup_error: Exception | None = None
+    setup_error: SkipValidation[Exception | None] = None
 
 
 def _start_stream(req: ExecuteRequest) -> _StartedStream:
@@ -258,8 +260,10 @@ def _start_stream(req: ExecuteRequest) -> _StartedStream:
     except ExecutorCapacityError as exc:
         raise _capacity_unavailable(OPERATION_EXECUTE_STREAM, exc) from exc
     except Exception as exc:
-        return _StartedStream(events, None, input_files_map, setup_error=exc)
-    return _StartedStream(events, first_event, input_files_map)
+        return _StartedStream(
+            events=events, first_event=None, input_files_map=input_files_map, setup_error=exc
+        )
+    return _StartedStream(events=events, first_event=first_event, input_files_map=input_files_map)
 
 
 def _sse_frames(started: _StartedStream, slot: ExecutionSlot) -> Iterator[str]:

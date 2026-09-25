@@ -837,8 +837,17 @@ for it before it sends the response headers. Errors after that point arrive as a
   fail the liveness probe and restart a replica with runs in flight. Its `status` field
   shows the last backend check, which a background task refreshes every
   `HEALTH_CHECK_INTERVAL_SEC` (default 30s).
-- `/ready` (readiness) runs a fresh backend check off the request thread pool, bounded
-  by `BACKEND_CHECK_TIMEOUT_SEC` (default 2.5s), and returns 503 when it fails.
+- `/health` returns 503 only when the checker itself is stuck: no check has completed,
+  with any result, in 3 × `HEALTH_CHECK_INTERVAL_SEC` + `BACKEND_CHECK_TIMEOUT_SEC`
+  (default 92.5s). A failed check counts as completed, so a Docker or Kubernetes API
+  outage keeps liveness at 200 and readiness at 503.
+- `/ready` (readiness) runs a fresh backend check, bounded by `BACKEND_CHECK_TIMEOUT_SEC`
+  (default 2.5s), and returns 503 when it fails or times out.
+- Backend checks are single-flight: while one runs, `/ready` and the background task
+  wait on it instead of starting another. They run on a dedicated pool of two threads,
+  so a hung check cannot starve the request thread pool, the session reaper or the
+  image watchdog. Kubernetes API calls on the health path have a (connect, read)
+  timeout of `BACKEND_CHECK_TIMEOUT_SEC`, so the thread itself ends.
 - Both report `executor_backend` and `network_isolation`
   (`net_admin_init_container+network_policy`, `network_policy_only`, or
   `docker_network:<name>`).

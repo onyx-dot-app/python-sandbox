@@ -297,8 +297,8 @@ resources:
 
 | Endpoint | Probe | Behavior |
 |----------|-------|----------|
-| `/health` | liveness | Answers from memory. It never calls the Kubernetes API, so a slow API server or a saturated replica does not get the pod restarted during runs. Always HTTP 200. `status` shows the last background backend check. |
-| `/ready` | readiness | Runs a fresh backend check (can the service account create executor pods). HTTP 503 when the check fails or takes longer than `BACKEND_CHECK_TIMEOUT_SEC`. |
+| `/health` | liveness | Answers from memory. It never calls the Kubernetes API, so a slow API server or a saturated replica does not get the pod restarted during runs. `status` shows the last background backend check. HTTP 503 only when the checker is stuck: no check has completed, with any result, in 3 × `HEALTH_CHECK_INTERVAL_SEC` + `BACKEND_CHECK_TIMEOUT_SEC` (default 92.5s). An API outage alone keeps it at 200. |
+| `/ready` | readiness | Runs a fresh backend check (can the service account create executor pods). HTTP 503 when the check fails or takes longer than `BACKEND_CHECK_TIMEOUT_SEC`. Checks are single-flight, and their API calls time out, so a hung API server cannot pile up threads. |
 
 Both payloads include `executor_backend` and `network_isolation`. For the Kubernetes
 backend, `network_isolation` is `net_admin_init_container+network_policy` when

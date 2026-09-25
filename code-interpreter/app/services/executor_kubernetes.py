@@ -27,6 +27,7 @@ from kubernetes.stream import ws_client  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict
 
 from app.app_configs import (
+    BACKEND_CHECK_TIMEOUT_SEC,
     DEFAULT_EXECUTOR_ID,
     KUBERNETES_EXECUTOR_FS_GROUP,
     KUBERNETES_EXECUTOR_IMAGE,
@@ -84,6 +85,11 @@ POD_DELETE_CONFIRM_TIMEOUT_SECONDS = 2.0
 SESSION_LABEL_SELECTOR = f"app={SESSION_APP_LABEL},component={SESSION_COMPONENT_LABEL}"
 
 POD_READY_POLL_INTERVAL_SECONDS: Final[float] = 0.2
+# (connect, read) timeout for API calls on the health path, so a hung API server ends the call.
+HEALTH_REQUEST_TIMEOUT: Final[tuple[float, float]] = (
+    BACKEND_CHECK_TIMEOUT_SEC,
+    BACKEND_CHECK_TIMEOUT_SEC,
+)
 # Covers file staging, the workspace snapshot and cleanup after the user timeout.
 EXECUTE_POD_DEADLINE_MARGIN_SECONDS: Final[int] = 120
 
@@ -387,6 +393,7 @@ class KubernetesExecutor(BaseExecutor):
             ).read_namespaced_deployment(
                 name=KUBERNETES_OWNER_DEPLOYMENT_NAME,
                 namespace=KUBERNETES_OWN_NAMESPACE,
+                _request_timeout=HEALTH_REQUEST_TIMEOUT,
             )
         except Exception as e:
             # Catch every error, not only ApiException. This runs in __init__,
@@ -427,7 +434,8 @@ class KubernetesExecutor(BaseExecutor):
                             resource="pods",
                         )
                     )
-                )
+                ),
+                _request_timeout=HEALTH_REQUEST_TIMEOUT,
             )
             if not review.status.allowed:
                 reason = review.status.reason or "no reason provided"

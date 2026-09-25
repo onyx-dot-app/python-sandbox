@@ -212,8 +212,10 @@ secret:
 
 # Health check probes. /health (liveness) answers from memory and never calls
 # the Kubernetes API, so a saturated or slow API server cannot get the pod
-# restarted mid-run. /ready (readiness) runs a fresh executor backend check and
-# returns 503 when the service cannot create executor pods.
+# restarted mid-run. It returns 503 only when the backend checker is stuck (no
+# check completed in about 92s by default). /ready (readiness) runs a fresh
+# executor backend check and returns 503 when the service cannot create
+# executor pods.
 livenessProbe:
   httpGet:
     path: /health

@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import SERVICE_VERSION, create_app, network_isolation_mode
+from app.main import (
+    SERVICE_VERSION,
+    BackendHealthMonitor,
+    checker_stale_after_sec,
+    create_app,
+    network_isolation_mode,
+)
 from app.services.executor_base import HealthCheck
 from app.services.executor_docker import DockerExecutor
 from app.services.executor_factory import get_executor
@@ -80,6 +87,100 @@ def test_ready_times_out_slow_backend_check() -> None:
 
     assert response.status_code == 503
     assert "timed out" in response.json()["message"]
+
+
+def _health_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name.startswith("backend-health")]
+
+
+def _wait_until(predicate: Callable[[], bool], timeout_sec: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_sec
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not met in time"
+        time.sleep(0.01)
+
+
+def test_hung_backend_check_is_single_flight_and_bounded() -> None:
+    release = threading.Event()
+    calls = 0
+
+    def _hung_check(self: DockerExecutor) -> HealthCheck:
+        nonlocal calls
+        calls += 1
+        release.wait()
+        return HealthCheck(status="ok")
+
+    try:
+        with (
+            patch("app.main.BACKEND_CHECK_TIMEOUT_SEC", 0.05),
+            patch.object(DockerExecutor, "check_health", _hung_check),
+        ):
+            client = TestClient(create_app())
+            baseline = threading.active_count()
+            for _ in range(10):
+                start = time.monotonic()
+                response = client.get("/ready")
+                assert time.monotonic() - start < 1
+                assert response.status_code == 503
+                assert "in progress" in response.json()["message"]
+                assert len(_health_threads()) <= 2
+                assert threading.active_count() <= baseline + 2
+            assert calls == 1
+    finally:
+        release.set()
+
+
+def test_health_stays_200_while_checks_fail() -> None:
+    unhealthy = HealthCheck(status="error", message="kubernetes API down")
+    with patch.object(DockerExecutor, "check_health", return_value=unhealthy):
+        app = create_app()
+        client = TestClient(app)
+        monitor: BackendHealthMonitor = app.state.backend_monitor
+        for _ in range(3):
+            monitor.last_completed_at -= checker_stale_after_sec()
+            assert client.get("/ready").status_code == 503
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert health.json()["message"] == "kubernetes API down"
+
+
+def test_health_flips_to_503_when_checker_is_wedged_and_recovers() -> None:
+    release = threading.Event()
+
+    def _hung_check(self: DockerExecutor) -> HealthCheck:
+        release.wait()
+        return HealthCheck(status="ok")
+
+    try:
+        with (
+            patch("app.main.BACKEND_CHECK_TIMEOUT_SEC", 0.05),
+            patch.object(DockerExecutor, "check_health", _hung_check),
+        ):
+            app = create_app()
+            client = TestClient(app)
+            monitor: BackendHealthMonitor = app.state.backend_monitor
+            assert client.get("/ready").status_code == 503
+            assert client.get("/health").status_code == 200
+
+            monitor.last_completed_at = time.monotonic() - checker_stale_after_sec() - 1
+            wedged = client.get("/health")
+            assert wedged.status_code == 503
+            assert "stuck" in wedged.json()["message"]
+
+            release.set()
+            _wait_until(lambda: not monitor.is_wedged())
+            assert client.get("/health").status_code == 200
+            assert client.get("/ready").status_code == 200
+    finally:
+        release.set()
+
+
+def test_checker_staleness_window_covers_three_intervals() -> None:
+    with (
+        patch("app.main.HEALTH_CHECK_INTERVAL_SEC", 30),
+        patch("app.main.BACKEND_CHECK_TIMEOUT_SEC", 2.5),
+    ):
+        assert checker_stale_after_sec() == 92.5
 
 
 def test_health_never_calls_executor_backend() -> None:

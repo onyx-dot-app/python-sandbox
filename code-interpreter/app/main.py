@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
-from collections.abc import AsyncGenerator
+import threading
+import time
+from collections.abc import AsyncGenerator, Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from importlib.metadata import version as _package_version
 from shutil import which
@@ -58,22 +61,65 @@ def network_isolation_mode() -> str:
     return f"docker_network:{PYTHON_EXECUTOR_DOCKER_NETWORK}"
 
 
-async def _check_backend() -> HealthCheck:
-    """Run the executor health check off the request threadpool, with a timeout."""
-    try:
-        with anyio.fail_after(BACKEND_CHECK_TIMEOUT_SEC):
-            return await asyncio.to_thread(lambda: get_executor().check_health())
-    except TimeoutError:
-        return HealthCheck(
-            status="error",
-            message=f"Executor backend check timed out after {BACKEND_CHECK_TIMEOUT_SEC}s",
-        )
-    except Exception as e:
-        return HealthCheck(status="error", message=f"Executor backend check failed: {e}")
+# Health checks get their own threads, so a hung backend call cannot starve other work.
+_HEALTH_CHECK_EXECUTOR: Final[ThreadPoolExecutor] = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="backend-health"
+)
+
+
+def checker_stale_after_sec() -> float:
+    """Time without a completed backend check after which the checker counts as wedged."""
+    return 3 * HEALTH_CHECK_INTERVAL_SEC + BACKEND_CHECK_TIMEOUT_SEC
+
+
+class BackendHealthMonitor:
+    """Runs backend checks single-flight on a dedicated pool and tracks checker progress.
+
+    A check counts as completed whatever its result, so a backend outage alone never
+    makes the checker look wedged.
+    """
+
+    def __init__(self, check: Callable[[], HealthCheck]) -> None:
+        self._check = check
+        self._lock = threading.Lock()
+        self._in_flight: Future[HealthCheck] | None = None
+        self.last_completed_at = time.monotonic()
+
+    def _run(self) -> HealthCheck:
+        try:
+            result = self._check()
+        except Exception as e:
+            result = HealthCheck(status="error", message=f"Executor backend check failed: {e}")
+        self.last_completed_at = time.monotonic()
+        return result
+
+    def _start_or_join(self) -> tuple[Future[HealthCheck], bool]:
+        with self._lock:
+            if self._in_flight is not None and not self._in_flight.done():
+                return self._in_flight, True
+            self._in_flight = _HEALTH_CHECK_EXECUTOR.submit(self._run)
+            return self._in_flight, False
+
+    async def check(self, timeout_sec: float) -> HealthCheck:
+        """Start a check, or join the one in flight, and wait at most ``timeout_sec``."""
+        future, joined = self._start_or_join()
+        try:
+            with anyio.fail_after(timeout_sec):
+                return await asyncio.shield(asyncio.wrap_future(future))
+        except TimeoutError:
+            detail = "an earlier check is still in progress" if joined else "check in progress"
+            return HealthCheck(
+                status="error",
+                message=f"Executor backend check timed out after {timeout_sec}s ({detail})",
+            )
+
+    def is_wedged(self) -> bool:
+        return time.monotonic() - self.last_completed_at > checker_stale_after_sec()
 
 
 async def _refresh_backend_health(app: FastAPI) -> HealthCheck:
-    result = await _check_backend()
+    monitor: BackendHealthMonitor = app.state.backend_monitor
+    result = await monitor.check(BACKEND_CHECK_TIMEOUT_SEC)
     app.state.backend_health = result
     return result
 
@@ -271,6 +317,7 @@ def create_app() -> FastAPI:
         queue_timeout_sec=EXECUTION_QUEUE_TIMEOUT_SEC,
     )
     app.state.backend_health = None
+    app.state.backend_monitor = BackendHealthMonitor(lambda: get_executor().check_health())
 
     def _health_response(result: HealthCheck | None) -> HealthResponse:
         return HealthResponse(
@@ -281,13 +328,26 @@ def create_app() -> FastAPI:
             network_isolation=network_isolation_mode(),
         )
 
-    @app.get("/health")
-    async def health() -> HealthResponse:
+    @app.get("/health", responses={503: {"model": HealthResponse}})
+    async def health(response: Response) -> HealthResponse:
         """Liveness: answers from memory, never calls the executor backend.
 
-        ``status`` reflects the last background backend check, so it can lag
-        by up to HEALTH_CHECK_INTERVAL_SEC. The HTTP status is always 200.
+        ``status`` reflects the last background backend check. HTTP 503 only when
+        the checker itself is wedged: no check, with any result, has completed in
+        checker_stale_after_sec(). A backend outage alone keeps this at 200.
         """
+        monitor: BackendHealthMonitor = app.state.backend_monitor
+        if monitor.is_wedged():
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return _health_response(
+                HealthCheck(
+                    status="error",
+                    message=(
+                        "Executor backend checker is stuck: no check completed in "
+                        f"{checker_stale_after_sec()}s"
+                    ),
+                )
+            )
         return _health_response(app.state.backend_health)
 
     @app.get("/ready", responses={503: {"model": HealthResponse}})

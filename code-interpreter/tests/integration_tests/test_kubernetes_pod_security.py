@@ -22,6 +22,7 @@ from app import app_configs
 from app.image_ref import default_image_pull_policy
 from app.services.executor_kubernetes import (
     EXECUTE_POD_DEADLINE_MARGIN_SECONDS,
+    HEALTH_REQUEST_TIMEOUT,
     ExecutorPodSettings,
     ExecutorPodStartError,
     KubernetesExecutor,
@@ -280,6 +281,16 @@ def test_pod_settings_is_frozen_and_rejects_unknown_fields() -> None:
         settings.ready_timeout_sec = 5
     with pytest.raises(ValidationError):
         ExecutorPodSettings(ready_timout_sec=5)  # type: ignore[call-arg]
+
+
+def test_health_check_bounds_the_api_call(executor: KubernetesExecutor) -> None:
+    with patch("app.services.executor_kubernetes.client.AuthorizationV1Api") as api:
+        api.return_value.create_self_subject_access_review.return_value = MagicMock(
+            status=MagicMock(allowed=True)
+        )
+        assert executor.check_health().status == "ok"
+    call = api.return_value.create_self_subject_access_review.call_args
+    assert call.kwargs["_request_timeout"] == HEALTH_REQUEST_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
