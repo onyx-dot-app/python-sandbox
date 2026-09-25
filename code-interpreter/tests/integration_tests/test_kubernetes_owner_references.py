@@ -12,7 +12,7 @@ import pytest
 from kubernetes.client import V1OwnerReference  # type: ignore[import-untyped]
 from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 
-from app.services.executor_kubernetes import KubernetesExecutor
+from app.services.executor_kubernetes import ExecutorPodSettings, KubernetesExecutor
 
 MODULE = "app.services.executor_kubernetes"
 
@@ -28,6 +28,7 @@ def executor() -> KubernetesExecutor:
     inst.service_account = ""
     inst.net_admin_lockdown = True
     inst.owner_reference = None
+    inst.pod_settings = ExecutorPodSettings()
     return inst
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import math
 import tarfile
 import time
 import uuid
@@ -10,7 +11,7 @@ from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal
 
 from kubernetes import client, config, stream  # type: ignore
 from kubernetes.client import (  # type: ignore[import-untyped]
@@ -22,15 +23,24 @@ from kubernetes.client import (  # type: ignore[import-untyped]
 )
 from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 from kubernetes.stream import ws_client  # type: ignore[import-untyped]
+from pydantic import BaseModel, ConfigDict
 
 from app.app_configs import (
+    DEFAULT_EXECUTOR_ID,
+    KUBERNETES_EXECUTOR_FS_GROUP,
     KUBERNETES_EXECUTOR_IMAGE,
+    KUBERNETES_EXECUTOR_IMAGE_PULL_POLICY,
     KUBERNETES_EXECUTOR_NAMESPACE,
     KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN,
+    KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM,
+    KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC,
+    KUBERNETES_EXECUTOR_RUN_AS_GROUP,
+    KUBERNETES_EXECUTOR_RUN_AS_USER,
     KUBERNETES_EXECUTOR_SERVICE_ACCOUNT,
     KUBERNETES_OWN_NAMESPACE,
     KUBERNETES_OWNER_DEPLOYMENT_NAME,
 )
+from app.image_ref import default_image_pull_policy
 from app.services.executor_base import (
     SESSION_APP_LABEL,
     SESSION_COMPONENT_LABEL,
@@ -56,6 +66,138 @@ POD_DELETE_RETRY_DELAY_SECONDS = 0.2
 POD_DELETE_CONFIRM_TIMEOUT_SECONDS = 2.0
 
 SESSION_LABEL_SELECTOR = f"app={SESSION_APP_LABEL},component={SESSION_COMPONENT_LABEL}"
+
+POD_READY_POLL_INTERVAL_SECONDS: Final[float] = 0.2
+# Covers file staging, the workspace snapshot and cleanup after the user timeout.
+EXECUTE_POD_DEADLINE_MARGIN_SECONDS: Final[int] = 120
+
+# Waiting reasons that do not resolve without operator action.
+FATAL_CONTAINER_WAITING_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "ErrImagePull",
+        "ImagePullBackOff",
+        "ErrImageNeverPull",
+        "InvalidImageName",
+        # Executor pods mount no Secrets or ConfigMaps, so this is a permanent spec conflict.
+        "CreateContainerConfigError",
+    }
+)
+
+
+KILL_PROCESSES_TIMEOUT_MS: Final[int] = 10_000
+
+EXEC_ID_ENV_VAR: Final[str] = "CODE_INTERPRETER_EXEC_ID"
+
+KillMatch = Literal["comm", "env"]
+
+# The executor image has no pkill. Kills processes whose comm (argv[1] == "comm") or
+# one environment entry (argv[1] == "env") equals argv[2], and their descendants,
+# except this script and PID 1 (the container's sleep).
+_KILL_PROCESSES_SCRIPT: Final[str] = """
+import os, signal, sys
+kind, value, me = sys.argv[1], sys.argv[2], os.getpid()
+matched, parent = set(), {}
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    pid = int(entry)
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            parent[pid] = int(f.read().rsplit(")", 1)[1].split()[1])
+        if kind == "comm":
+            with open(f"/proc/{pid}/comm") as f:
+                hit = f.read().strip() == value
+        else:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                hit = value.encode() in f.read().split(b"\\0")
+    except (OSError, ValueError, IndexError):
+        continue
+    if hit and pid not in (me, 1):
+        matched.add(pid)
+targets = matched
+grew = True
+while grew:
+    children = {pid for pid, ppid in parent.items() if ppid in targets} - targets
+    targets |= children
+    grew = bool(children)
+killed = 0
+for pid in targets - {me}:
+    try:
+        os.kill(pid, signal.SIGKILL)
+        killed += 1
+    except OSError:
+        pass
+print(killed)
+"""
+
+
+def kill_processes_command(match: KillMatch, value: str) -> list[str]:
+    """Command that SIGKILLs matching processes and their descendants in an executor pod."""
+    return ["python", "-c", _KILL_PROCESSES_SCRIPT, match, value]
+
+
+class ExecutorPodStartError(RuntimeError):
+    """An executor pod failed to reach Running."""
+
+
+class ExecutorPodSettings(BaseModel):
+    """Pod-level settings for executor pods. ``None`` IDs are left to the platform."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ready_timeout_sec: int = 30
+    image_pull_policy: str | None = None
+    run_as_user: int | None = DEFAULT_EXECUTOR_ID
+    run_as_group: int | None = DEFAULT_EXECUTOR_ID
+    fs_group: int | None = DEFAULT_EXECUTOR_ID
+    read_only_root_filesystem: bool = True
+
+    @staticmethod
+    def from_env() -> ExecutorPodSettings:
+        return ExecutorPodSettings(
+            ready_timeout_sec=KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC,
+            image_pull_policy=KUBERNETES_EXECUTOR_IMAGE_PULL_POLICY,
+            run_as_user=KUBERNETES_EXECUTOR_RUN_AS_USER,
+            run_as_group=KUBERNETES_EXECUTOR_RUN_AS_GROUP,
+            fs_group=KUBERNETES_EXECUTOR_FS_GROUP,
+            read_only_root_filesystem=KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM,
+        )
+
+
+def _pod_start_failure(pod: V1Pod) -> str | None:
+    """Return why ``pod`` can never reach Running, or None if it still might."""
+    status = pod.status
+    if status is None:
+        return None
+    if status.phase in ("Failed", "Succeeded"):
+        detail = status.message or status.reason or "no reason reported"
+        return f"pod phase is {status.phase}: {detail}"
+    for container_status in [
+        *(status.init_container_statuses or []),
+        *(status.container_statuses or []),
+    ]:
+        waiting = container_status.state.waiting if container_status.state else None
+        if waiting is not None and waiting.reason in FATAL_CONTAINER_WAITING_REASONS:
+            return (
+                f"container {container_status.name} is {waiting.reason}: "
+                f"{waiting.message or 'no message'}"
+            )
+    return None
+
+
+def _container_waiting_detail(pod: V1Pod) -> str | None:
+    """Return the first non-routine container waiting reason and message, if any."""
+    status = pod.status
+    if status is None:
+        return None
+    for container_status in [
+        *(status.init_container_statuses or []),
+        *(status.container_statuses or []),
+    ]:
+        waiting = container_status.state.waiting if container_status.state else None
+        if waiting is not None and waiting.reason and waiting.reason != "ContainerCreating":
+            return f"{waiting.reason}: {waiting.message or 'no message'}"
+    return None
 
 
 def _parse_exit_code(error: str) -> int | None:
@@ -100,6 +242,7 @@ class KubernetesExecutor(BaseExecutor):
         self.image = KUBERNETES_EXECUTOR_IMAGE
         self.service_account = KUBERNETES_EXECUTOR_SERVICE_ACCOUNT
         self.net_admin_lockdown = KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN
+        self.pod_settings = ExecutorPodSettings.from_env()
         self.owner_reference = self._resolve_owner_reference()
 
     def _resolve_owner_reference(self) -> V1OwnerReference | None:
@@ -211,7 +354,7 @@ class KubernetesExecutor(BaseExecutor):
 
         ``command`` is the executor container's command (e.g. ``["sleep", "3600"]``).
         ``active_deadline_seconds``, when set, instructs kubelet to stop the pod
-        at that age — used by sessions to enforce TTL even if the API is down.
+        at that age, which bounds the pod's life even if this service is down.
         """
         resources: dict[str, dict[str, Any]] = {"limits": {}, "requests": {}}
 
@@ -225,20 +368,30 @@ class KubernetesExecutor(BaseExecutor):
             resources["limits"]["cpu"] = str(cpu_limit)
             resources["requests"]["cpu"] = "100m"
 
+        settings = self.pod_settings
+        image_pull_policy = settings.image_pull_policy or default_image_pull_policy(self.image)
+
+        container_security_context: dict[str, Any] = {
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": settings.read_only_root_filesystem,
+            "capabilities": {"drop": ["ALL"]},
+        }
+        if settings.run_as_user is not None:
+            container_security_context["runAsUser"] = settings.run_as_user
+        if settings.run_as_group is not None:
+            container_security_context["runAsGroup"] = settings.run_as_group
+
         container = V1Container(
             name="executor",
             image=self.image,
+            image_pull_policy=image_pull_policy,
             command=list(command),
             working_dir="/workspace",
             resources=resources if resources["limits"] else None,
-            security_context={
-                "runAsUser": 65532,
-                "runAsGroup": 65532,
-                "allowPrivilegeEscalation": False,
-                "readOnlyRootFilesystem": False,
-                "capabilities": {"drop": ["ALL"]},
-            },
+            security_context=container_security_context,
             env=[
+                # The image has no passwd entry for the executor user, so HOME is "/".
+                {"name": "HOME", "value": "/tmp"},  # noqa: S108
                 {"name": "PYTHONUNBUFFERED", "value": "1"},
                 {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
                 {"name": "PYTHONIOENCODING", "value": "utf-8"},
@@ -260,6 +413,13 @@ class KubernetesExecutor(BaseExecutor):
         # This requires the NET_ADMIN capability. Environments whose CNI
         # enforces NetworkPolicies without that race (or that disallow
         # NET_ADMIN) can disable this and rely on a NetworkPolicy instead.
+        pod_security_context: dict[str, Any] = {
+            "runAsNonRoot": True,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        }
+        if settings.fs_group is not None:
+            pod_security_context["fsGroup"] = settings.fs_group
+
         init_containers: list[V1Container] = []
         if self.net_admin_lockdown:
             iptables_script = "set -e && iptables -A OUTPUT -j DROP && ip6tables -A OUTPUT -j DROP"
@@ -267,6 +427,7 @@ class KubernetesExecutor(BaseExecutor):
                 V1Container(
                     name="network-lockdown",
                     image=self.image,
+                    image_pull_policy=image_pull_policy,
                     command=["sh", "-c", iptables_script],
                     security_context={
                         "runAsUser": 0,
@@ -288,14 +449,12 @@ class KubernetesExecutor(BaseExecutor):
             restart_policy="Never",
             active_deadline_seconds=active_deadline_seconds,
             service_account_name=self.service_account if self.service_account else None,
+            automount_service_account_token=False,
             volumes=[
                 {"name": "workspace", "emptyDir": {"sizeLimit": "100Mi"}},
                 {"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}},
             ],
-            security_context={
-                "runAsNonRoot": True,
-                "fsGroup": 65532,
-            },
+            security_context=pod_security_context,
         )
 
         metadata = V1ObjectMeta(
@@ -364,16 +523,46 @@ class KubernetesExecutor(BaseExecutor):
 
         return tar_buffer.getvalue()
 
-    def _wait_for_pod_ready(self, pod_name: str, timeout_sec: int = 30) -> None:
-        """Wait for a pod to reach Running state."""
-        logger.info(f"Waiting for pod {pod_name} to be ready")
-        for _ in range(timeout_sec * 10):
+    def _wait_for_pod_ready(self, pod_name: str) -> None:
+        """Wait for a pod to reach Running, failing fast when it never can.
+
+        Raises ExecutorPodStartError on an image pull failure, a container that
+        cannot be created, a terminal pod phase, or the ready timeout.
+        """
+        timeout_sec = self.pod_settings.ready_timeout_sec
+        logger.info(f"Waiting up to {timeout_sec}s for pod {pod_name} to be ready")
+        deadline = time.monotonic() + timeout_sec
+        phase: str | None = None
+        last_waiting: str | None = None
+        while True:
             pod = self.v1.read_namespaced_pod(pod_name, self.namespace)
-            if pod.status.phase == "Running":
+            phase = pod.status.phase if pod.status else None
+            if phase == "Running":
                 logger.info(f"Pod {pod_name} is running")
                 return
-            time.sleep(0.1)
-        raise RuntimeError(f"Pod {pod_name} did not become ready in {timeout_sec} seconds")
+            failure = _pod_start_failure(pod)
+            last_waiting = _container_waiting_detail(pod) or last_waiting
+            if failure is not None:
+                raise ExecutorPodStartError(
+                    f"Executor pod {pod_name} (image {self.image}) cannot start: {failure}"
+                )
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(POD_READY_POLL_INTERVAL_SECONDS)
+        waiting_note = f", last waiting reason: {last_waiting}" if last_waiting else ""
+        raise ExecutorPodStartError(
+            f"Executor pod {pod_name} did not become ready in {timeout_sec} seconds "
+            f"(phase={phase}{waiting_note}); raise KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC "
+            "if image pulls or scheduling are slow"
+        )
+
+    def _execute_pod_deadline_seconds(self, timeout_ms: int) -> int:
+        """Lifetime bound for an execute pod, so a crashed service cannot leak it long."""
+        return (
+            self.pod_settings.ready_timeout_sec
+            + math.ceil(timeout_ms / 1000)
+            + EXECUTE_POD_DEADLINE_MARGIN_SECONDS
+        )
 
     def _stream_pod_exec(
         self,
@@ -446,25 +635,48 @@ class KubernetesExecutor(BaseExecutor):
                 f"stderr: {tar_stderr.decode('utf-8', errors='replace')}"
             )
 
-    def _kill_processes_in_pod(self, pod_name: str, process_name: str) -> None:
-        """Best-effort SIGKILL of all processes named ``process_name`` in the pod."""
+    def _kill_processes_in_pod(self, pod_name: str, match: KillMatch, value: str) -> None:
+        """Best-effort SIGKILL of matching processes and their descendants."""
         try:
-            self._stream_pod_exec(
+            resp = self._stream_pod_exec(
                 pod_name,
-                command=["pkill", "-9", process_name],
-                stderr=False,
+                command=kill_processes_command(match, value),
+                stderr=True,
                 stdin=False,
-                stdout=False,
+                stdout=True,
                 tty=False,
+            )
+            stdout, stderr, exit_code, timed_out = self._drain_exec_stream(
+                resp, KILL_PROCESSES_TIMEOUT_MS
             )
         except Exception:
             logger.warning(
-                "Failed to kill %s process in pod %s", process_name, pod_name, exc_info=True
+                "Failed to kill processes (%s=%s) in pod %s", match, value, pod_name, exc_info=True
             )
+            return
+
+        if timed_out or exit_code != 0:
+            logger.warning(
+                "Failed to kill processes (%s=%s) in pod %s (exit_code=%s, timed_out=%s): %s",
+                match,
+                value,
+                pod_name,
+                exit_code,
+                timed_out,
+                stderr.decode("utf-8", errors="replace").strip(),
+            )
+            return
+        logger.info(
+            "Killed %s process(es) (%s=%s) in pod %s",
+            stdout.decode("utf-8", errors="replace").strip(),
+            match,
+            value,
+            pod_name,
+        )
 
     def _kill_python_process(self, pod_name: str) -> None:
         """Kill the Python process running in the pod."""
-        self._kill_processes_in_pod(pod_name, "python")
+        self._kill_processes_in_pod(pod_name, "comm", "python")
 
     def _drain_exec_stream(
         self,
@@ -509,6 +721,7 @@ class KubernetesExecutor(BaseExecutor):
         self,
         *,
         code: str,
+        timeout_ms: int,
         cpu_time_limit_sec: int | None,
         memory_limit_mb: int | None,
         files: Sequence[tuple[str, bytes]] | None,
@@ -525,10 +738,12 @@ class KubernetesExecutor(BaseExecutor):
             f"Code to execute: {code[:100]}..." if len(code) > 100 else f"Code to execute: {code}"
         )
 
+        deadline_seconds = self._execute_pod_deadline_seconds(timeout_ms)
         pod_manifest = self._create_pod_manifest(
             pod_name=pod_name,
-            command=["sleep", "3600"],
+            command=["sleep", str(deadline_seconds)],
             labels={"app": "code-interpreter", "component": "executor"},
+            active_deadline_seconds=deadline_seconds,
             memory_limit_mb=memory_limit_mb,
             cpu_time_limit_sec=cpu_time_limit_sec,
         )
@@ -839,10 +1054,11 @@ class KubernetesExecutor(BaseExecutor):
                 raise SessionNotFoundError(session_id) from e
             raise
 
+        exec_marker = f"{EXEC_ID_ENV_VAR}={uuid.uuid4().hex}"
         start = time.perf_counter()
         exec_resp = self._stream_pod_exec(
             session_id,
-            command=["bash", "-c", cmd],
+            command=["env", exec_marker, "bash", "-c", cmd],
             stderr=True,
             stdin=False,
             stdout=True,
@@ -854,7 +1070,7 @@ class KubernetesExecutor(BaseExecutor):
         )
 
         if timed_out:
-            self._kill_processes_in_pod(session_id, "bash")
+            self._kill_processes_in_pod(session_id, "env", exec_marker)
 
         duration_ms = int((time.perf_counter() - start) * 1000)
         return ExecutionResult(
@@ -886,6 +1102,7 @@ class KubernetesExecutor(BaseExecutor):
         """
         with self._run_in_pod(
             code=code,
+            timeout_ms=timeout_ms,
             cpu_time_limit_sec=cpu_time_limit_sec,
             memory_limit_mb=memory_limit_mb,
             files=files,
@@ -945,6 +1162,7 @@ class KubernetesExecutor(BaseExecutor):
         """
         with self._run_in_pod(
             code=code,
+            timeout_ms=timeout_ms,
             cpu_time_limit_sec=cpu_time_limit_sec,
             memory_limit_mb=memory_limit_mb,
             files=files,

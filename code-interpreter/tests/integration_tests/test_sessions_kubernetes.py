@@ -20,6 +20,7 @@ from app.services.executor_base import (
 )
 from app.services.executor_kubernetes import (
     SESSION_LABEL_SELECTOR,
+    ExecutorPodSettings,
     KubernetesExecutor,
 )
 
@@ -34,6 +35,7 @@ def executor() -> KubernetesExecutor:
     inst.service_account = ""
     inst.net_admin_lockdown = True
     inst.owner_reference = None
+    inst.pod_settings = ExecutorPodSettings()
     pod_mock = MagicMock()
     pod_mock.status.phase = "Running"
     inst.v1.read_namespaced_pod.return_value = pod_mock

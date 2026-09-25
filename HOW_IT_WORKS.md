@@ -221,26 +221,51 @@ The Kubernetes executor (`executor_kubernetes.py`) provides cloud-native, scalab
 | Control | Implementation | Purpose |
 |---------|---------------|---------|
 | **RunAsNonRoot** | `securityContext.runAsNonRoot: true` | Enforces non-root execution |
-| **User/Group** | `runAsUser: 65532, runAsGroup: 65532` | Unprivileged execution |
+| **User/Group** | `runAsUser: 65532, runAsGroup: 65532` (configurable, or platform-assigned) | Unprivileged execution |
 | **No Privilege Escalation** | `allowPrivilegeEscalation: false` | Prevents setuid/setgid |
 | **Capability Dropping** | `drop: ["ALL"]` | Zero Linux capabilities |
-| **Network Policy** | (Cluster-configurable) | Can restrict network access |
+| **Seccomp** | `seccompProfile: RuntimeDefault` | Blocks dangerous syscalls |
+| **Read-only Root** | `readOnlyRootFilesystem: true` (configurable) | Writes only to `/workspace` and `/tmp` |
+| **Network Lockdown** | Optional NET_ADMIN init container + NetworkPolicy | Blocks egress |
 | **Resource Limits** | `limits.memory`, `limits.cpu` | Prevents resource exhaustion |
+| **Lifetime Bound** | `activeDeadlineSeconds` | Stops pods the service fails to delete |
 | **Ephemeral Storage** | `emptyDir` volumes | No persistent storage |
-| **ServiceAccount** | Minimal or none | Restricts Kubernetes API access |
+| **ServiceAccount** | `automountServiceAccountToken: false` | No Kubernetes API credentials |
 
 **Pod Security Context:**
 
 ```yaml
+# Pod
+automountServiceAccountToken: false
 securityContext:
   runAsNonRoot: true
-  runAsUser: 65532
-  runAsGroup: 65532
-  fsGroup: 65532
+  fsGroup: 65532            # omitted in platform mode
+  seccompProfile:
+    type: RuntimeDefault
+# Executor container
+securityContext:
+  runAsUser: 65532          # omitted in platform mode
+  runAsGroup: 65532         # omitted in platform mode
   allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
   capabilities:
     drop: ["ALL"]
 ```
+
+**Pod Security Standards:**
+
+- Without the network lockdown init container
+  (`KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN=false`), executor pods pass the
+  `restricted` Pod Security Standard.
+- With the lockdown init container (the default), they need the `privileged` standard.
+  The init container runs as root and adds `NET_ADMIN`, which `baseline` and
+  `restricted` do not allow.
+- OpenShift `restricted-v2` also rejects the fixed IDs. Set
+  `KUBERNETES_EXECUTOR_RUN_AS_USER`, `KUBERNETES_EXECUTOR_RUN_AS_GROUP` and
+  `KUBERNETES_EXECUTOR_FS_GROUP` to empty strings (chart: `securityContext.mode:
+  platform`) so that OpenShift assigns them. The image then runs as an arbitrary UID;
+  its only writable paths are the `/workspace` and `/tmp` emptyDirs, and `HOME` is
+  `/tmp`.
 
 **Resource Limits:**
 
@@ -271,8 +296,11 @@ Pod Filesystem:
 
 **Execution Model:**
 
-1. Pod created with `sleep 3600` command
-2. Wait up to 30 seconds for Pod to reach Running state
+1. Pod created with a `sleep` command and `activeDeadlineSeconds` equal to the ready
+   timeout plus the execution timeout plus 120 seconds
+2. Wait up to `KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC` (default 30) for Pod to reach
+   Running state. Image pull errors, container config errors and terminal phases fail
+   at once with the reason
 3. Stream tar archive via `kubectl exec -i tar -x`
 4. Execute Python via `kubectl exec python __main__.py`
 5. Read output via WebSocket streams (stdout, stderr, error channel)
@@ -282,7 +310,8 @@ Pod Filesystem:
 
 **Kubernetes-Specific Security:**
 
-- **Pod Security Standards**: Can enforce restricted, baseline, or privileged policies
+- **Pod Security Standards**: `restricted` when the NET_ADMIN lockdown is off,
+  `privileged` when it is on
 - **Network Policies**: Can isolate Pods from cluster network
 - **Resource Quotas**: Cluster-level limits on compute resources
 - **RBAC**: ServiceAccount with minimal permissions
@@ -518,7 +547,8 @@ tar.addfile(file_info, io.BytesIO(content))
 
 **Kubernetes:**
 
-- Pod Security Standards (enforce restricted profile)
+- Pod Security Standards (`restricted` profile, with the NET_ADMIN lockdown off)
+- Seccomp `RuntimeDefault` on every executor pod
 - Runtime hardening (e.g., gVisor, Kata Containers)
 - Node isolation (dedicated node pools for untrusted workloads)
 
@@ -723,7 +753,8 @@ The code-interpreter service provides secure, isolated Python execution through:
 - **Development**: Docker executor with Docker-out-of-Docker
 - **Production**: Kubernetes executor with:
   - NetworkPolicy (deny all egress)
-  - Pod Security Standards (restricted profile)
+  - Pod Security Standards (restricted profile, which needs the NET_ADMIN lockdown off
+    and a CNI that enforces the NetworkPolicy)
   - Dedicated node pools for untrusted workloads
   - Resource quotas and limits
   - Monitoring and alerting on execution metrics

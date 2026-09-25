@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.executor_kubernetes import KubernetesExecutor
+from app.services.executor_kubernetes import ExecutorPodSettings, KubernetesExecutor
 
 
 @pytest.fixture()
@@ -27,6 +27,7 @@ def executor() -> KubernetesExecutor:
     inst.service_account = ""
     inst.net_admin_lockdown = True
     inst.owner_reference = None
+    inst.pod_settings = ExecutorPodSettings()
     return inst
 
 

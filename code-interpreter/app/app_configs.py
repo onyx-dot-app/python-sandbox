@@ -3,6 +3,47 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Final
+
+IMAGE_PULL_POLICIES: Final[frozenset[str]] = frozenset({"Always", "IfNotPresent", "Never"})
+DEFAULT_EXECUTOR_ID: Final[int] = 65532
+
+
+def _bounded_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name) or str(default)
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from e
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}, got {value}")
+    return value
+
+
+def _optional_id_env(name: str, *, minimum: int) -> int | None:
+    """Unset means the default ID; set but empty means omit the field."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return DEFAULT_EXECUTOR_ID
+    if not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(f"{name} must be an integer or empty, got {raw!r}") from e
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}")
+    return value
+
+
+def _image_pull_policy_env(name: str) -> str | None:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    if raw not in IMAGE_PULL_POLICIES:
+        raise ValueError(f"{name} must be one of {sorted(IMAGE_PULL_POLICIES)}, got {raw!r}")
+    return raw
+
 
 # Executor backend selection
 EXECUTOR_BACKEND = os.environ.get("EXECUTOR_BACKEND") or "docker"
@@ -48,6 +89,29 @@ KUBERNETES_EXECUTOR_NET_ADMIN_LOCKDOWN = (
 # long-lived workloads. Requires "get" on apps/deployments.
 KUBERNETES_OWN_NAMESPACE = os.environ.get("KUBERNETES_OWN_NAMESPACE") or ""
 KUBERNETES_OWNER_DEPLOYMENT_NAME = os.environ.get("KUBERNETES_OWNER_DEPLOYMENT_NAME") or ""
+# How long to wait for an executor pod to reach Running, including the image pull.
+KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC: Final[int] = _bounded_int_env(
+    "KUBERNETES_EXECUTOR_READY_TIMEOUT_SEC", 30, minimum=1, maximum=600
+)
+# Empty derives the policy from the image tag, as Kubernetes does: Always for an
+# untagged or ":latest" image, IfNotPresent otherwise.
+KUBERNETES_EXECUTOR_IMAGE_PULL_POLICY: Final[str | None] = _image_pull_policy_env(
+    "KUBERNETES_EXECUTOR_IMAGE_PULL_POLICY"
+)
+# User, group and fsGroup of executor pods. Unset means 65532. Set but empty omits
+# the field so the platform assigns one (OpenShift restricted-v2 SCC).
+KUBERNETES_EXECUTOR_RUN_AS_USER: Final[int | None] = _optional_id_env(
+    "KUBERNETES_EXECUTOR_RUN_AS_USER", minimum=1
+)
+KUBERNETES_EXECUTOR_RUN_AS_GROUP: Final[int | None] = _optional_id_env(
+    "KUBERNETES_EXECUTOR_RUN_AS_GROUP", minimum=0
+)
+KUBERNETES_EXECUTOR_FS_GROUP: Final[int | None] = _optional_id_env(
+    "KUBERNETES_EXECUTOR_FS_GROUP", minimum=0
+)
+KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM: Final[bool] = (
+    os.environ.get("KUBERNETES_EXECUTOR_READ_ONLY_ROOT_FILESYSTEM") or "true"
+).lower() not in ("false", "0", "no")
 
 # Execution limits
 MAX_EXEC_TIMEOUT_MS = int(os.environ.get("MAX_EXEC_TIMEOUT_MS") or 60_000)

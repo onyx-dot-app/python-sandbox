@@ -26,3 +26,15 @@ def normalize_image_ref(ref: str) -> str:
     if last_colon > last_slash:
         return ref
     return f"{ref}:latest"
+
+
+def default_image_pull_policy(ref: str) -> str:
+    """Return the pull policy Kubernetes would default to for ``ref``.
+
+    Kubernetes uses ``Always`` for an untagged or ``:latest`` image and
+    ``IfNotPresent`` for any other tag or a digest.
+    """
+    if "@" in ref:
+        return "IfNotPresent"
+    tag = normalize_image_ref(ref).rsplit(":", 1)[1]
+    return "Always" if tag == "latest" else "IfNotPresent"

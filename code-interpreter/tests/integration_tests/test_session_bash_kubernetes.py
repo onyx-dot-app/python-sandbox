@@ -8,7 +8,7 @@ import pytest
 from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
 
 from app.services.executor_base import SESSION_NAME_PREFIX, SessionNotFoundError
-from app.services.executor_kubernetes import KubernetesExecutor
+from app.services.executor_kubernetes import ExecutorPodSettings, KubernetesExecutor
 
 
 @pytest.fixture()
@@ -20,6 +20,7 @@ def executor() -> KubernetesExecutor:
     inst.service_account = ""
     inst.net_admin_lockdown = True
     inst.owner_reference = None
+    inst.pod_settings = ExecutorPodSettings()
     return inst
 
 
@@ -112,15 +113,18 @@ def test_bash_invokes_bash_dash_c(executor: KubernetesExecutor) -> None:
         )
 
     call = exec_mock.call_args
-    assert call.kwargs["command"] == ["bash", "-c", "ls -la"]
+    command = call.kwargs["command"]
+    assert command[0] == "env"
+    assert command[1].startswith("CODE_INTERPRETER_EXEC_ID=")
+    assert command[2:] == ["bash", "-c", "ls -la"]
     # Network-related kwargs should be absent — exec inherits the pod's locked-down namespace.
     assert "network" not in call.kwargs
 
 
-def test_bash_times_out_and_kills_bash(executor: KubernetesExecutor) -> None:
+def test_bash_times_out_and_kills_its_processes(executor: KubernetesExecutor) -> None:
     fake = _FakeExecResp()  # never delivers exit
     with (
-        patch.object(executor, "_stream_pod_exec", return_value=fake),
+        patch.object(executor, "_stream_pod_exec", return_value=fake) as exec_mock,
         patch.object(executor, "_kill_processes_in_pod") as kill,
     ):
         result = executor.execute_bash_in_session(
@@ -132,7 +136,8 @@ def test_bash_times_out_and_kills_bash(executor: KubernetesExecutor) -> None:
 
     assert result.timed_out is True
     assert result.exit_code is None
-    kill.assert_called_once_with(f"{SESSION_NAME_PREFIX}abc", "bash")
+    marker = exec_mock.call_args.kwargs["command"][1]
+    kill.assert_called_once_with(f"{SESSION_NAME_PREFIX}abc", "env", marker)
 
 
 def test_bash_rejects_non_session_id(executor: KubernetesExecutor) -> None:
