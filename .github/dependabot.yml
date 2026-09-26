@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # Python dependencies via uv.lock
+  - package-ecosystem: "uv"
+    directory: "/executor"
+    schedule:
+      interval: "daily"
+      time: "08:00"
+    allow:
+      - dependency-type: "all"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(executor):"
+  - package-ecosystem: "uv"
+    directory: "/code-interpreter"
+    schedule:
+      interval: "daily"
+      time: "08:00"
+    allow:
+      - dependency-type: "all"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(code-interpreter):"
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci:"
