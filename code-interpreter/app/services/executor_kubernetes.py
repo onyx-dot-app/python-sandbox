@@ -93,6 +93,11 @@ HEALTH_REQUEST_TIMEOUT: Final[tuple[float, float]] = (
 # Covers file staging, the workspace snapshot and cleanup after the user timeout.
 EXECUTE_POD_DEADLINE_MARGIN_SECONDS: Final[int] = 120
 
+# The API server's exec websocket (golang.org/x/net/websocket) rejects any frame over its
+# 32 MiB DefaultMaxPayloadBytes and closes the session, seen as a broken pipe mid-upload.
+# 1 MiB is simply well under that.
+EXEC_STDIN_CHUNK_BYTES: Final[int] = 1024 * 1024
+
 # Waiting reasons that do not resolve without operator action.
 FATAL_CONTAINER_WAITING_REASONS: Final[frozenset[str]] = frozenset(
     {
@@ -745,7 +750,8 @@ class KubernetesExecutor(BaseExecutor):
             tty=False,
         )
 
-        resp.write_stdin(tar_archive)
+        for offset in range(0, len(tar_archive), EXEC_STDIN_CHUNK_BYTES):
+            resp.write_stdin(tar_archive[offset : offset + EXEC_STDIN_CHUNK_BYTES])
         resp.write_stdin(b"")
 
         tar_stderr = b""

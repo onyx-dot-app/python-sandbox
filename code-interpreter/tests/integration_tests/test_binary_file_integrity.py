@@ -1,20 +1,21 @@
-"""Tests that binary files with high bytes (>= 0x80) survive the tar pipeline.
-
-Regression test for a bug where the Kubernetes executor decoded tar archives
-as latin-1 text before sending through a WebSocket. The WebSocket re-encoded
-as UTF-8, corrupting any byte >= 0x80 (single latin-1 bytes became multi-byte
-UTF-8 sequences), which produced "tar: Skipping to next header" errors.
-"""
+"""The staged-files tar must reach the executor pod intact: raw bytes (never a
+latin-1 string a text frame would re-encode as UTF-8) and in frames the API
+server accepts, which drops any exec frame over 32 MiB."""
 
 from __future__ import annotations
 
 import io
+import os
 import tarfile
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.executor_kubernetes import ExecutorPodSettings, KubernetesExecutor
+from app.services.executor_kubernetes import (
+    EXEC_STDIN_CHUNK_BYTES,
+    ExecutorPodSettings,
+    KubernetesExecutor,
+)
 
 
 @pytest.fixture()
@@ -139,3 +140,30 @@ def test_ascii_only_tar_unaffected_by_encoding(
     assert roundtripped == tar_bytes, (
         "ASCII-only tar archives should be unaffected by latin-1→UTF-8"
     )
+
+
+def test_large_tar_is_uploaded_in_bounded_frames(executor: KubernetesExecutor) -> None:
+    _mock_pod_running(executor.v1)
+    content = os.urandom(3 * EXEC_STDIN_CHUNK_BYTES + 1)
+    tar_resp = _mock_stream_resp()
+    exec_resp = _mock_stream_resp()
+
+    with patch("app.services.executor_kubernetes.stream.stream") as mock_stream:
+        mock_stream.side_effect = [tar_resp, exec_resp]
+        executor.execute_python(
+            code="print('hello')",
+            stdin=None,
+            timeout_ms=5000,
+            max_output_bytes=1024,
+            files=[("data.bin", content)],
+        )
+
+    frames = [call.args[0] for call in tar_resp.write_stdin.call_args_list]
+    data_frames = [frame for frame in frames if frame]
+    for frame in data_frames:
+        assert len(frame) <= EXEC_STDIN_CHUNK_BYTES
+
+    with tarfile.open(fileobj=io.BytesIO(b"".join(data_frames)), mode="r") as tar:
+        member = tar.extractfile("data.bin")
+        assert member is not None
+        assert member.read() == content
