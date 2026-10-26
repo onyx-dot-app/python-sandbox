@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "executor"
-version = "0.4.9"
+version = "0.4.10"
 description = "Dependency bundle for the code interpreter executor image"
 requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
@@ -20,7 +20,7 @@ dependencies = [
   "pandas==2.2.2",
   "pdfplumber>=0.11.7",
   "pydantic>=2.11.9",
-  "pypdf==6.13.3",
+  "pypdf==6.21.2",
   "python-docx==1.2.0",
   "python-pptx>=1.0.2",
   "reportlab>=5.0.0",
