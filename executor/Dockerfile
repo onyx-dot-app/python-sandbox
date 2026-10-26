@@ -1,10 +1,11 @@
 FROM python:3.11-slim
 
-# Install build prerequisites and uv for dependency management
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
+
+# Install build prerequisites
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
-        curl \
         gfortran \
         iptables \
         libfreetype6-dev \
@@ -13,10 +14,7 @@ RUN apt-get update \
         libpng-dev \
         pkg-config \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && rm -rf /tmp/*
-
-ENV PATH="/root/.local/bin:${PATH}"
 
 # Pre-install the scientific stack via uv using a dedicated lockfile
 COPY pyproject.toml uv.lock /tmp/executor/
