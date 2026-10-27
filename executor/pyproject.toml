@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "executor"
-version = "0.4.9"
+version = "0.4.10"
 description = "Dependency bundle for the code interpreter executor image"
 requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
@@ -15,12 +15,12 @@ dependencies = [
   "matplotlib-inline>=0.1.7",
   "matplotlib-venn>=1.1.2",
   "numpy==1.26.4",
-  "opencv-python>=4.11.0.86",
+  "opencv-python-headless>=4.11.0.86",
   "openpyxl>=3.1.5",
   "pandas==2.2.2",
   "pdfplumber>=0.11.7",
   "pydantic>=2.11.9",
-  "pypdf==6.13.3",
+  "pypdf==6.21.2",
   "python-docx==1.2.0",
   "python-pptx>=1.0.2",
   "reportlab>=5.0.0",

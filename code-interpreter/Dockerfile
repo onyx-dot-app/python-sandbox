@@ -7,12 +7,12 @@ ARG SKIP_NESTED_DOCKER=0
 
 WORKDIR /app
 
-# Install uv package manager without relying on pip
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
+
 RUN set -eux \
     && apt-get update \
     && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Docker (full daemon + CLI) if not disabled via build arg
 RUN if [ "${SKIP_NESTED_DOCKER}" != "1" ]; then \
@@ -34,8 +34,6 @@ RUN if [ "${SKIP_NESTED_DOCKER}" != "1" ]; then \
     rm -rf /var/lib/apt/lists/*; \
     which docker && docker --version || echo "Docker installation failed"; \
     fi
-
-ENV PATH="/root/.local/bin:${PATH}"
 
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
