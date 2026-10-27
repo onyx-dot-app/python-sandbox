@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directories:
+      - "/executor"
+      - "/code-interpreter"
+    schedule:
+      interval: "weekly"
+    # Version updates off; security updates are grouped into one PR per directory.
+    open-pull-requests-limit: 0
+    groups:
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"

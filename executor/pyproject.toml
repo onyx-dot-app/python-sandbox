@@ -10,7 +10,7 @@ requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
 authors = [{ name = "Chris Weaver" }]
 dependencies = [
-  "fpdf2==2.8.7",
+  "fpdf2==2.8.9",
   "matplotlib==3.9.1",
   "matplotlib-inline>=0.1.7",
   "matplotlib-venn>=1.1.2",
