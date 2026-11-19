@@ -41,6 +41,43 @@ jobs:
       - name: Run ruff formatting check
         run: uv run ruff format --check .
 
+  golang-checks:
+    name: Go Quality Checks and Tests
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./code-interpreter-go
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: code-interpreter-go/go.mod
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Pull executor Docker image
+        run: docker pull onyxdotapp/python-executor-sci:latest
+
+      - name: Run Docker executor end-to-end test
+        run: go test ./internal/executor -run TestDockerExecutorEndToEnd -v
+        env:
+          CODE_INTERPRETER_GO_E2E: "1"
+
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest

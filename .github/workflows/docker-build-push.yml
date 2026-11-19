@@ -96,3 +96,116 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Each platform builds on a NATIVE runner (no QEMU emulation) and pushes
+  # per-target images by digest; the merge job below assembles the multi-arch
+  # manifest lists. Targets are defined in code-interpreter-go/docker-bake.hcl.
+  build-code-interpreter-go:
+    name: Build Code Interpreter Go (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: build-executor
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to dhi.io for hardened base images
+        uses: docker/login-action@v3
+        with:
+          registry: dhi.io
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: bake
+        uses: docker/bake-action@v5
+        with:
+          workdir: ./code-interpreter-go
+          set: |
+            *.platform=${{ matrix.platform }}
+            *.output=type=image,name=${{ env.DOCKERHUB_USERNAME }}/code-interpreter-go,push-by-digest=true,name-canonical=true,push=true
+            full.cache-from=type=gha,scope=code-interpreter-go-full-${{ matrix.arch }}
+            full.cache-to=type=gha,scope=code-interpreter-go-full-${{ matrix.arch }},mode=max
+            slim.cache-from=type=gha,scope=code-interpreter-go-slim-${{ matrix.arch }}
+            slim.cache-to=type=gha,scope=code-interpreter-go-slim-${{ matrix.arch }},mode=max
+        env:
+          PUSH_BY_DIGEST: "1"
+
+      - name: Export digests
+        run: |
+          mkdir -p /tmp/digests
+          cat <<'METADATA' > /tmp/digests/${{ matrix.arch }}.json
+          ${{ steps.bake.outputs.metadata }}
+          METADATA
+
+      - name: Upload digests
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-interpreter-go-digests-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}.json
+          retention-days: 1
+
+  merge-code-interpreter-go:
+    name: Merge Code Interpreter Go Manifests
+    runs-on: ubuntu-latest
+    needs: build-code-interpreter-go
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: code-interpreter-go-digests-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Read version from config
+        id: version
+        run: echo "version=$(grep -m1 'ServiceVersion = ' code-interpreter-go/internal/config/config.go | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Create multi-arch manifests
+        run: |
+          REPO="${{ env.DOCKERHUB_USERNAME }}/code-interpreter-go"
+          VERSION="${{ steps.version.outputs.version }}"
+          digest() { jq -r --arg t "$1" '.[$t]["containerimage.digest"]' "/tmp/digests/$2.json"; }
+
+          docker buildx imagetools create \
+            -t "$REPO:$VERSION" -t "$REPO:latest" \
+            "$REPO@$(digest full amd64)" "$REPO@$(digest full arm64)"
+
+          docker buildx imagetools create \
+            -t "$REPO:$VERSION-slim" -t "$REPO:latest-slim" \
+            "$REPO@$(digest slim amd64)" "$REPO@$(digest slim arm64)"
+
+      - name: Inspect published manifests
+        run: |
+          REPO="${{ env.DOCKERHUB_USERNAME }}/code-interpreter-go"
+          docker buildx imagetools inspect "$REPO:${{ steps.version.outputs.version }}"
+          docker buildx imagetools inspect "$REPO:${{ steps.version.outputs.version }}-slim"
